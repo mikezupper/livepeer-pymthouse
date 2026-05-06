@@ -7,18 +7,19 @@
  * Core invariant:
  *   A billable usage_billing_events row is only created when:
  *   1. The signing request includes an explicit pipeline/model constraint.
- *   2. The signed ticket price/unit facts match the NaaP advertised price for
- *      that exact pipeline/model/orchestrator.
+ *   2. Cached NaaP pricing is available and the signed ticket price/unit facts
+ *      match the advertised price for that exact pipeline/model/orchestrator.
  *
- * Client-supplied pipeline/model labels are claims, not proof. The matching
- * of signed price against advertised price is the validation step that
- * establishes trust.
+ * The live payment hot path does not fetch NaaP; it reads the in-process cache
+ * only (`getCachedDashboardPricing`). UI and `GET /api/v1/pipeline-pricing`
+ * refresh that cache.
  */
 
 import crypto from "crypto";
 import type { PricingRow } from "./naap-catalog";
 import type { EthUsdOracleResult } from "./prices/eth-usd-oracle";
 import type { planCapabilityBundles, plans } from "@/db/schema";
+import { extractPipelineModelFromCapabilitiesBase64 } from "./proto";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,7 @@ export interface GatewayAttribution {
 export type PriceValidationStatus =
   | "matched"
   | "missing_constraint"
+  | "pricing_unavailable"
   | "unknown_pipeline_model"
   | "missing_advertised_price"
   | "price_mismatch";
@@ -84,6 +86,27 @@ export function resolveRequestPipelineModelConstraint(
 
   if (!pipeline || !modelId) return null;
   return { pipeline, modelId };
+}
+
+/**
+ * Resolve pipeline/model for billing: explicit body fields first, then
+ * base64-encoded `net.Capabilities` (`capabilities` field), matching the Go
+ * remote signer payment request shape.
+ */
+export async function resolvePaymentPipelineModelConstraint(
+  requestBody: Record<string, unknown>,
+): Promise<PipelineModelConstraint | null> {
+  const direct = resolveRequestPipelineModelConstraint(requestBody);
+  if (direct) return direct;
+
+  const capsB64 =
+    pickString(requestBody, "capabilities") ??
+    pickString(requestBody, "Capabilities");
+  if (!capsB64) return null;
+
+  const fromCaps = await extractPipelineModelFromCapabilitiesBase64(capsB64);
+  if (!fromCaps) return null;
+  return { pipeline: fromCaps.pipeline, modelId: fromCaps.modelId };
 }
 
 /**

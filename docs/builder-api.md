@@ -370,14 +370,14 @@ Returns `{ ethUsd: { priceUsd, source, observedAt, isFallback } }`.
 
 ### Trusted pipeline/model attribution
 
-Every billable signing transaction must be attributable to a specific pipeline/model. PymtHouse establishes trust by:
+Billable **`usage_billing_events`** rows require a pipeline/model constraint **and** a cache-backed match between the signed ticket’s `priceWeiPerUnit` / `pixelsPerUnit` and NaaP’s advertised price for that pipeline/model/orchestrator.
 
-1. Requiring an explicit `pipeline` and `modelId` in the payment request (from the `python-gateway` metadata envelope or a direct API caller).
-2. Loading the NaaP advertised pricing for that pipeline/model.
-3. Requiring an exact match of `priceWeiPerUnit` and `pixelsPerUnit` against the advertised price.
-4. Recording a `usage_billing_events` row only on a successful match.
+1. **Constraint:** `pipeline` + `modelId` on the payment request (from the `python-gateway` metadata envelope or a direct API caller), **or** base64 **`capabilities`** (`net.Capabilities`) from which PymtHouse can derive a single pipeline/model (same shape the Go remote signer uses).
+2. **Cached pricing only on the signing path:** `POST /api/signer/generate-live-payment` does **not** call NaaP. It reads **`getCachedDashboardPricing()`** after the signer succeeds. Populate/refresh the cache via **`GET /api/v1/pipeline-pricing`** (or other callers of **`fetchDashboardPricing()`** / **`refreshDashboardPricing()`**).
+3. **Validation:** When cache and constraint are present, PymtHouse compares signed vs advertised units; **`usage_billing_events`** is inserted only when validation status is **`matched`**.
+4. **Diagnostics:** **`transactions`** always records metering when the signer succeeds and `feeWei > 0`; **`price_validation_status`** / **`price_validation_reason`** describe outcomes such as **`missing_constraint`**, **`pricing_unavailable`**, or **`price_mismatch`**. Signing is **not** blocked by missing cache or mismatch — the gateway still receives the signer response.
 
-Requests without a pipeline/model constraint return **`400 Bad Request`**. Requests with a mismatched price return **`409 Conflict`**.
+Client-supplied pipeline/model labels are claims until validated against cached advertised pricing.
 
 #### Gateway payment metadata contract
 

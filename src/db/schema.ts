@@ -152,7 +152,7 @@ export const transactions = pgTable(
     /** Decoded from the ticket signing request. */
     signedPriceWeiPerUnit: text("signed_price_wei_per_unit"),
     signedPixelsPerUnit: text("signed_pixels_per_unit"),
-    /** matched | missing_constraint | unknown_pipeline_model | missing_advertised_price | price_mismatch */
+    /** matched | missing_constraint | pricing_unavailable | unknown_pipeline_model | missing_advertised_price | price_mismatch */
     priceValidationStatus: text("price_validation_status"),
     priceValidationReason: text("price_validation_reason"),
     // --- ETH/USD oracle snapshot at signing time ---

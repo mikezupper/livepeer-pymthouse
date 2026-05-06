@@ -100,8 +100,9 @@ if [ -z "${SIGNER_UPSTREAM:-}" ] && [ -x /usr/local/bin/livepeer ]; then
   /usr/local/bin/livepeer $ARGS &
   LIVEPEER_PID=$!
   i=0
+  ready_timeout="${SIGNER_READY_TIMEOUT_SECONDS:-300}"
   ready=0
-  while [ "$i" -lt 60 ]; do
+  while [ "$i" -lt "$ready_timeout" ]; do
     if ! kill -0 "$LIVEPEER_PID" 2>/dev/null; then
       echo "entrypoint: livepeer (pid $LIVEPEER_PID) exited before becoming ready" >&2
       wait "$LIVEPEER_PID" 2>/dev/null || true
@@ -117,7 +118,7 @@ if [ -z "${SIGNER_UPSTREAM:-}" ] && [ -x /usr/local/bin/livepeer ]; then
     sleep 1
   done
   if [ "$ready" -ne 1 ]; then
-    echo "entrypoint: livepeer did not become ready on 127.0.0.1:${SIGNER_PORT} within 60s" >&2
+    echo "entrypoint: livepeer did not become ready on 127.0.0.1:${SIGNER_PORT} within ${ready_timeout}s" >&2
     if kill -0 "$LIVEPEER_PID" 2>/dev/null; then
       kill "$LIVEPEER_PID" 2>/dev/null || true
       wait "$LIVEPEER_PID" 2>/dev/null || true

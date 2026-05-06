@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
+import protobuf from "protobufjs";
 
 import {
   buildConstraintHash,
   computeUsdMicrosFromWei,
   resolveGatewayAttribution,
+  resolvePaymentPipelineModelConstraint,
   resolveRequestPipelineModelConstraint,
   resolveUpcharge,
   validateSignedTicketPriceForPipelineModel,
@@ -43,6 +46,54 @@ test("resolveRequestPipelineModelConstraint returns null when modelId is missing
 
 test("resolveRequestPipelineModelConstraint returns null for empty body", () => {
   assert.equal(resolveRequestPipelineModelConstraint({}), null);
+});
+
+async function lv2vCapabilitiesBase64(modelId: string): Promise<string> {
+  const protoPath = path.resolve(process.cwd(), "proto/lp_rpc.proto");
+  const root = await protobuf.load(protoPath);
+  const Capabilities = root.lookupType("net.Capabilities");
+  const payload = {
+    capacities: { 35: 1 },
+    constraints: {
+      PerCapability: {
+        35: {
+          models: {
+            [modelId]: {},
+          },
+        },
+      },
+    },
+  };
+  const err = Capabilities.verify(payload);
+  if (err) throw new Error(err);
+  const msg = Capabilities.create(payload);
+  return Buffer.from(Capabilities.encode(msg).finish()).toString("base64");
+}
+
+test("resolvePaymentPipelineModelConstraint reads capabilities base64", async () => {
+  const caps = await lv2vCapabilitiesBase64("streamdiffusion-sdxl");
+  const r = await resolvePaymentPipelineModelConstraint({ capabilities: caps });
+  assert.deepEqual(r, {
+    pipeline: "live-video-to-video",
+    modelId: "streamdiffusion-sdxl",
+  });
+});
+
+test("resolvePaymentPipelineModelConstraint prefers explicit pipeline over capabilities", async () => {
+  const caps = await lv2vCapabilitiesBase64("streamdiffusion-sdxl");
+  const r = await resolvePaymentPipelineModelConstraint({
+    capabilities: caps,
+    pipeline: "text-to-image",
+    modelId: "stabilityai/sdxl",
+  });
+  assert.deepEqual(r, { pipeline: "text-to-image", modelId: "stabilityai/sdxl" });
+});
+
+test("resolvePaymentPipelineModelConstraint returns null for invalid capabilities", async () => {
+  const r = await resolvePaymentPipelineModelConstraint({
+    capabilities: "not-valid-base64!!!",
+  });
+  assert.equal(r, null);
 });
 
 // ─── resolveGatewayAttribution ───────────────────────────────────────────────
@@ -241,6 +292,7 @@ const basePlan = {
   generalUpchargePercentBps: 2000, // 20%
   payPerUseUpchargePercentBps: 1000, // 10%
   billingCycle: "monthly",
+  discoveryPolicy: null,
   createdAt: "",
   updatedAt: "",
 } as const;
@@ -255,6 +307,7 @@ const baseBundle = {
   slaTargetP95Ms: null,
   maxPricePerUnit: null,
   upchargePercentBps: 5000, // 50% override
+  discoveryPolicy: null,
   createdAt: "",
 } as const;
 
@@ -262,6 +315,31 @@ test("resolveUpcharge: pipeline/model bundle wins over general", () => {
   const result = resolveUpcharge({
     plan: basePlan,
     bundles: [baseBundle],
+    pipeline: "text-to-image",
+    modelId: "stabilityai/sdxl",
+  });
+  assert.equal(result.bps, 5000);
+  assert.equal(result.source, "pipeline_model");
+});
+
+test("resolveUpcharge: pipeline wildcard bundle applies to concrete model", () => {
+  const result = resolveUpcharge({
+    plan: basePlan,
+    bundles: [{ ...baseBundle, modelId: "*", upchargePercentBps: 3500 }],
+    pipeline: "text-to-image",
+    modelId: "black-forest-labs/flux",
+  });
+  assert.equal(result.bps, 3500);
+  assert.equal(result.source, "pipeline_model");
+});
+
+test("resolveUpcharge: exact bundle wins over pipeline wildcard", () => {
+  const result = resolveUpcharge({
+    plan: basePlan,
+    bundles: [
+      { ...baseBundle, modelId: "*", upchargePercentBps: 3500 },
+      { ...baseBundle, modelId: "stabilityai/sdxl", upchargePercentBps: 5000 },
+    ],
     pipeline: "text-to-image",
     modelId: "stabilityai/sdxl",
   });

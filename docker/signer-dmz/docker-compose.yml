@@ -41,6 +41,7 @@ services:
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-https://pymthouse.com/api/v1/oidc}
       JWKS_URI: ${JWKS_URI:-https://pymthouse.com/api/v1/oidc/jwks}
       JWKS_REFRESH_SECONDS: ${JWKS_REFRESH_SECONDS:-900}
+      JWKS_TLS_INSECURE: ${JWKS_TLS_INSECURE:-}
     depends_on:
       - signer
     healthcheck:

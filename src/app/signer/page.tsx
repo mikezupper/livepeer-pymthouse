@@ -20,6 +20,7 @@ import {
   getJwksUrlForLocalSignerDmzContainer,
 } from "@/lib/oidc/issuer-urls";
 import { resolveDmzHostPort } from "@/lib/signer-dmz-host-port";
+import { getSignerUrl } from "@/lib/signer-proxy";
 
 function formatWei(wei: string | null): string {
   if (!wei || wei === "0") return "0 WEI";
@@ -76,6 +77,12 @@ export default async function SignerPage() {
   const oidcAudience = oidcIssuer;
   const oidcJwksUrl = getJwksUrlForLocalSignerDmzContainer();
   const dmzHostPort = resolveDmzHostPort(signer.signerPort);
+  const effectiveSignerUrl = getSignerUrl(signer);
+  const signerUrlSource = signer.signerUrl
+    ? "saved"
+    : process.env.SIGNER_INTERNAL_URL
+      ? "env"
+      : "default";
 
   return (
     <DashboardLayout>
@@ -202,9 +209,13 @@ export default async function SignerPage() {
             remoteDiscovery: signer.remoteDiscovery,
             orchWebhookUrl: signer.orchWebhookUrl,
             liveAICapReportInterval: signer.liveAICapReportInterval,
+            signerUrl: signer.signerUrl,
+            signerApiKey: signer.signerApiKey,
             oidcIssuer,
             oidcAudience,
             oidcJwksUrl,
+            effectiveSignerUrl,
+            signerUrlSource,
           }}
         />
       </div>

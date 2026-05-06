@@ -263,15 +263,16 @@ export async function cleanupTestApp(
     );
   }
 
-  await db.execute(sql`DELETE FROM oidc_auth_codes WHERE client_id = ${oidcClientPublic}`);
-  await db.execute(sql`DELETE FROM oidc_refresh_tokens WHERE client_id = ${oidcClientPublic}`);
-  await db.execute(sql`DELETE FROM oidc_device_codes WHERE client_id = ${oidcClientPublic}`);
+  await deleteFromOptionalTable("oidc_auth_codes", "client_id", oidcClientPublic);
+  await deleteFromOptionalTable("oidc_refresh_tokens", "client_id", oidcClientPublic);
+  await deleteFromOptionalTable("oidc_device_codes", "client_id", oidcClientPublic);
 
   await db.execute(sql`DELETE FROM api_keys WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM subscriptions WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM plan_capability_bundles WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM plans WHERE client_id = ${appId}`);
 
+  await db.execute(sql`DELETE FROM usage_billing_events WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM usage_records WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM auth_audit_log WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM app_allowed_domains WHERE app_id = ${appId}`);
@@ -311,6 +312,31 @@ export async function cleanupTestApp(
 function arrayLiteral(ids: string[]): string {
   const escaped = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(",");
   return `ARRAY[${escaped}]::text[]`;
+}
+
+async function deleteFromOptionalTable(
+  tableName: string,
+  columnName: string,
+  value: string,
+): Promise<void> {
+  await db.execute(
+    sql`DELETE FROM ${sql.identifier(tableName)} WHERE ${sql.identifier(columnName)} = ${value}`,
+  ).catch((err: unknown) => {
+    const cause = err instanceof Error ? err.cause : undefined;
+    if (
+      (typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        err.code === "42P01") ||
+      (typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        cause.code === "42P01")
+    ) {
+      return;
+    }
+    throw err;
+  });
 }
 
 export function basicAuthHeader(clientId: string, clientSecret: string): string {

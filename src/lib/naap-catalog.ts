@@ -142,11 +142,22 @@ export async function fetchPipelineCatalog(): Promise<PipelineCatalogEntry[]> {
   return entries;
 }
 
-/** Fetch (and cache) NaaP per-orchestrator pricing rows. */
-export async function fetchDashboardPricing(): Promise<PricingRow[]> {
+/**
+ * In-memory pricing snapshot only (no network). Used on hot paths such as
+ * `generate-live-payment` so signing never waits on NaaP.
+ */
+export function getCachedDashboardPricing(): PricingRow[] | null {
   if (pricingCache && pricingCache.expiresAt > Date.now()) {
     return pricingCache.data;
   }
+  return null;
+}
+
+/**
+ * Refresh pricing from NaaP and update the in-memory cache. Call from non-hot
+ * paths (e.g. `GET /api/v1/pipeline-pricing`) or tests that need a primed cache.
+ */
+export async function refreshDashboardPricing(): Promise<PricingRow[]> {
   const raw = await naapGet("/dashboard/pricing");
   if (!Array.isArray(raw)) {
     throw new Error("NaaP pricing response is not an array");
@@ -158,6 +169,15 @@ export async function fetchDashboardPricing(): Promise<PricingRow[]> {
   }
   pricingCache = { data: rows, expiresAt: Date.now() + PRICING_TTL_MS };
   return rows;
+}
+
+/** Fetch (and cache) NaaP per-orchestrator pricing rows — cache read, else network refresh. */
+export async function fetchDashboardPricing(): Promise<PricingRow[]> {
+  const cached = getCachedDashboardPricing();
+  if (cached !== null) {
+    return cached;
+  }
+  return refreshDashboardPricing();
 }
 
 /** Invalidate in-memory caches (useful for tests). */

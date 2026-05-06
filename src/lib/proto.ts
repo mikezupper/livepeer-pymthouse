@@ -2,14 +2,75 @@ import protobuf from "protobufjs";
 import path from "path";
 
 let orchestratorInfoType: protobuf.Type | null = null;
+let capabilitiesType: protobuf.Type | null = null;
 
-async function loadProto(): Promise<protobuf.Type> {
+async function loadOrchestratorInfoType(): Promise<protobuf.Type> {
   if (orchestratorInfoType) return orchestratorInfoType;
 
   const protoPath = path.resolve(process.cwd(), "proto/lp_rpc.proto");
   const root = await protobuf.load(protoPath);
   orchestratorInfoType = root.lookupType("net.OrchestratorInfo");
   return orchestratorInfoType;
+}
+
+async function loadCapabilitiesType(): Promise<protobuf.Type> {
+  if (capabilitiesType) return capabilitiesType;
+
+  const protoPath = path.resolve(process.cwd(), "proto/lp_rpc.proto");
+  const root = await protobuf.load(protoPath);
+  capabilitiesType = root.lookupType("net.Capabilities");
+  return capabilitiesType;
+}
+
+/**
+ * Map numeric capability id (livepeer `CapabilityId`) to pipeline slug used in
+ * discovery and NaaP pricing (matches python-gateway `capability_pipeline_id`).
+ */
+export function capabilityIdToPipelineId(capId: number): string | null {
+  const names: Record<number, string> = {
+    [-2]: "INVALID",
+    [-1]: "UNUSED",
+    0: "H264",
+    1: "MPEGTS",
+    2: "MP4",
+    3: "FRACTIONAL_FRAMERATES",
+    4: "STORAGE_DIRECT",
+    5: "STORAGE_S3",
+    6: "STORAGE_GCS",
+    7: "H264_BASELINE_PROFILE",
+    8: "H264_MAIN_PROFILE",
+    9: "H264_HIGH_PROFILE",
+    10: "H264_CONSTRAINED_CONTAINED_HIGH_PROFILE",
+    11: "GOP",
+    12: "AUTH_TOKEN",
+    14: "MPEG7_SIGNATURE",
+    15: "HEVC_DECODE",
+    16: "HEVC_ENCODE",
+    17: "VP8_DECODE",
+    18: "VP9_DECODE",
+    19: "VP8_ENCODE",
+    20: "VP9_ENCODE",
+    21: "H264_DECODE_YUV444_8BIT",
+    22: "H264_DECODE_YUV422_8BIT",
+    23: "H264_DECODE_YUV444_10BIT",
+    24: "H264_DECODE_YUV422_10BIT",
+    25: "H264_DECODE_YUV420_10BIT",
+    26: "SEGMENT_SLICING",
+    27: "TEXT_TO_IMAGE",
+    28: "IMAGE_TO_IMAGE",
+    29: "IMAGE_TO_VIDEO",
+    30: "UPSCALE",
+    31: "AUDIO_TO_TEXT",
+    32: "SEGMENT_ANYTHING_2",
+    33: "LLM",
+    34: "IMAGE_TO_TEXT",
+    35: "LIVE_VIDEO_TO_VIDEO",
+    36: "TEXT_TO_SPEECH",
+    37: "BYOC",
+  };
+  const enumName = names[capId];
+  if (!enumName) return null;
+  return enumName.toLowerCase().replace(/_/g, "-");
 }
 
 export interface PriceInfo {
@@ -33,7 +94,7 @@ export interface DecodedOrchestratorInfo {
 export async function decodeOrchestratorInfo(
   orchestratorBytes: Buffer | Uint8Array | string
 ): Promise<DecodedOrchestratorInfo> {
-  const type = await loadProto();
+  const type = await loadOrchestratorInfoType();
 
   let buf: Uint8Array;
   if (typeof orchestratorBytes === "string") {
@@ -69,6 +130,88 @@ export async function decodeOrchestratorInfo(
       })
     ),
   };
+}
+
+export interface PipelineModelFromCapabilities {
+  pipeline: string;
+  modelId: string;
+}
+
+/**
+ * Decode `net.Capabilities` from base64 (same wire format python-gateway sends).
+ */
+export async function decodeCapabilities(
+  capabilitiesBytes: Buffer | Uint8Array | string,
+): Promise<Record<string, unknown>> {
+  const type = await loadCapabilitiesType();
+
+  let buf: Uint8Array;
+  if (typeof capabilitiesBytes === "string") {
+    buf = Buffer.from(capabilitiesBytes, "base64");
+  } else {
+    buf = capabilitiesBytes;
+  }
+
+  const message = type.decode(buf);
+  return type.toObject(message, {
+    longs: Number,
+    bytes: Buffer,
+    defaults: true,
+  }) as Record<string, unknown>;
+}
+
+/**
+ * Extract the first constrained pipeline/model from decoded Capabilities
+ * (`constraints.PerCapability[*].models`), deterministic order matching
+ * python-gateway `capabilities_to_query`.
+ */
+export function extractPipelineModelFromCapabilitiesObject(
+  obj: Record<string, unknown>,
+): PipelineModelFromCapabilities | null {
+  const constraints = obj.constraints as Record<string, unknown> | undefined;
+  if (!constraints || typeof constraints !== "object") return null;
+
+  const perRaw =
+    constraints.PerCapability ??
+    (constraints as { perCapability?: unknown }).perCapability;
+  if (!perRaw || typeof perRaw !== "object") return null;
+
+  const per = perRaw as Record<string, unknown>;
+  const capIds = Object.keys(per)
+    .map((k) => Number(k))
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+
+  for (const capId of capIds) {
+    const pipeline = capabilityIdToPipelineId(capId);
+    if (!pipeline) continue;
+
+    const capBlock = per[String(capId)] as Record<string, unknown> | undefined;
+    if (!capBlock || typeof capBlock !== "object") continue;
+
+    const models = capBlock.models as Record<string, unknown> | undefined;
+    if (!models || typeof models !== "object") continue;
+
+    const modelKeys = Object.keys(models)
+      .filter((m) => typeof m === "string" && m.trim())
+      .sort();
+    if (modelKeys.length === 0) continue;
+
+    return { pipeline, modelId: modelKeys[0]! };
+  }
+
+  return null;
+}
+
+export async function extractPipelineModelFromCapabilitiesBase64(
+  base64: string,
+): Promise<PipelineModelFromCapabilities | null> {
+  try {
+    const obj = await decodeCapabilities(base64.trim());
+    return extractPipelineModelFromCapabilitiesObject(obj);
+  } catch {
+    return null;
+  }
 }
 
 /**
