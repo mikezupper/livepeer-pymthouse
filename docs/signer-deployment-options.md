@@ -361,9 +361,19 @@ To update to a new version:
    - `docker/signer-dmz/Dockerfile` (livepeer download in the `signer-dmz` image stage)
    - `nixpacks.toml` (install phase)
 
-3. **Redeploy** on your platform
+3. **Redeploy** on your platform (push to the connected branch, or use the host’s **Redeploy** / **Deploy** button). If the previous image is still served, clear the platform **build cache** or force an uncached build (e.g. `fly deploy --no-cache` on Fly.io).
 
 4. **Test** the new version
+
+### Rebuilding the image locally
+
+From the repository root, force a full Docker rebuild (same as a fresh CI layer for the livepeer download):
+
+```bash
+docker build --no-cache -f docker/signer-dmz/Dockerfile -t pymthouse/signer-dmz:local .
+```
+
+See also [docker/signer-dmz/README.md](../docker/signer-dmz/README.md) (section **Rebuilding the image (redeployments)**).
 
 ## Next Steps
 

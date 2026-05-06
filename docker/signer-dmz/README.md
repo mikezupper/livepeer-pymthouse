@@ -23,6 +23,22 @@ docker compose -f docker/signer-dmz/docker-compose.yml up --build
 docker build -f docker/signer-dmz/Dockerfile.signer -t pymthouse-signer .
 ```
 
+### Rebuilding the image (redeployments)
+
+Docker may reuse cached layers; the layer that downloads `go-livepeer` will not run again unless it is invalidated. After changing `LIVEPEER_COMMIT`, `LIVEPEER_SHA256`, or whenever you want a full local rebuild, run **`--no-cache`** from the **repository root**:
+
+```bash
+docker build --no-cache -f docker/signer-dmz/Dockerfile -t pymthouse/signer-dmz:local .
+```
+
+For **signer-only** (`Dockerfile.signer`), the same idea applies:
+
+```bash
+docker build --no-cache -f docker/signer-dmz/Dockerfile.signer -t pymthouse-signer:local .
+```
+
+**Hosted platforms** (Railway, Render, Fly.io, etc.) typically build a new image when you push to the connected branch or trigger **Redeploy** / **Deploy**. If the service still serves an old binary, clear its **build cache** in the dashboard or use a CLI flag such as `fly deploy --no-cache` when available.
+
 Platform config (`railway.json`, `render.yaml`) builds `docker/signer-dmz/Dockerfile` (final image: Apache JWT DMZ + livepeer). For **livepeer only** (no Apache), use `Dockerfile.signer` instead. See [docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md) and [docs/signer-deployment-options.md](../../docs/signer-deployment-options.md).
 
 ## Railway networking (Docker DMZ)
