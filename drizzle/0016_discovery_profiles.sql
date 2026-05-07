@@ -70,7 +70,7 @@ BEGIN
     VALUES (
       new_profile_id,
       r.client_id,
-      r.plan_name || ' (discovery)',
+      COALESCE(r.plan_name, '') || ' (discovery) [' || r.plan_id || ']',
       r.plan_dp,
       plan_created,
       plan_updated

@@ -56,7 +56,7 @@ export async function GET(
 
   const whereClause = conditions.length === 1 ? conditions[0] : and(...conditions);
 
-  const rows = await db
+  let rows = await db
     .select()
     .from(usageRecords)
     .where(whereClause!);
@@ -78,6 +78,15 @@ export async function GET(
             ),
           )
       : [];
+
+  if (filterGatewayRequestId) {
+    const allowedUsageIds = new Set(
+      billingEvents
+        .map((e) => e.usageRecordId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
+    rows = rows.filter((r) => allowedUsageIds.has(r.id));
+  }
 
   // Build a map from usageRecordId → billing event for quick join
   const eventByUsageRecord = new Map(

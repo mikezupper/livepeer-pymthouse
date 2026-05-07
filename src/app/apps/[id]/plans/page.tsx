@@ -203,9 +203,10 @@ export default function AppPlansPage() {
       const generalBps = form.generalUpchargePct ? parseBps(form.generalUpchargePct) : null;
       const payPerUseBps = form.payPerUseUpchargePct ? parseBps(form.payPerUseUpchargePct) : null;
       const capabilityBps = form.capabilityUpchargePct ? parseBps(form.capabilityUpchargePct) : null;
-      const includedUsdMicros = form.includedUsdDisplay
-        ? displayToUsdMicros(form.includedUsdDisplay)
-        : null;
+      const includedUsdMicros =
+        form.type === "subscription" && form.includedUsdDisplay
+          ? displayToUsdMicros(form.includedUsdDisplay)
+          : null;
 
       const capabilities = form.capabilityKeys.map((key) => {
         const sep = key.indexOf("|");

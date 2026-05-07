@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import Module from "node:module";
+import test from "node:test";
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db/index";
@@ -39,6 +40,10 @@ moduleWithLoad._load = (request, parent, isMain) => {
   return originalLoad(request, parent, isMain);
 };
 
+test.after(() => {
+  moduleWithLoad._load = originalLoad;
+});
+
 async function postPlan(clientId: string, body: Record<string, unknown>) {
   const { POST } = await import("./route");
   const res = await POST(
@@ -55,9 +60,9 @@ async function postPlan(clientId: string, body: Record<string, unknown>) {
 run("plans POST validates subscription billing fields before creating a plan", async (t) => {
   const app = await seedDeveloperAppWithClient({ status: "approved" });
   authorizedApp = app;
-  t.after(() => {
+  t.after(async () => {
     authorizedApp = null;
-    return cleanupTestApp(app);
+    await cleanupTestApp(app);
   });
 
   const missingBilling = await postPlan(app.clientId, {
@@ -102,9 +107,9 @@ run("plans POST validates subscription billing fields before creating a plan", a
 run("plans POST validates capabilities and discovery policy payloads", async (t) => {
   const app = await seedDeveloperAppWithClient({ status: "approved" });
   authorizedApp = app;
-  t.after(() => {
+  t.after(async () => {
     authorizedApp = null;
-    return cleanupTestApp(app);
+    await cleanupTestApp(app);
   });
 
   const nonArrayCapabilities = await postPlan(app.clientId, {

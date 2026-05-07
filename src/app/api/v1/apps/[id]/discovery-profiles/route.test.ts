@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import Module from "node:module";
+import test from "node:test";
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db/index";
@@ -39,12 +40,16 @@ moduleWithLoad._load = (request, parent, isMain) => {
   return originalLoad(request, parent, isMain);
 };
 
+test.after(() => {
+  moduleWithLoad._load = originalLoad;
+});
+
 run("discovery-profiles POST GET and DELETE", async (t) => {
   const app = await seedDeveloperAppWithClient({ status: "approved" });
   authorizedApp = app;
-  t.after(() => {
+  t.after(async () => {
     authorizedApp = null;
-    return cleanupTestApp(app);
+    await cleanupTestApp(app);
   });
 
   const { POST: postCollection, GET: getCollection } = await import("./route");

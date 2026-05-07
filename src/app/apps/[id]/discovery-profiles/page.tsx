@@ -281,13 +281,19 @@ export default function AppDiscoveryProfilesPage() {
       <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-6 space-y-4">
           <h2 className="text-lg font-semibold text-zinc-100">New profile</h2>
-          <input
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder="Profile name"
-            disabled={!canEdit}
-            className="w-full px-3 py-2 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-zinc-100 disabled:opacity-50"
-          />
+          <div>
+            <label htmlFor="profile-name" className="block text-xs text-zinc-500 mb-1">
+              Profile name
+            </label>
+            <input
+              id="profile-name"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="Profile name"
+              disabled={!canEdit}
+              className="w-full px-3 py-2 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-zinc-100 disabled:opacity-50"
+            />
+          </div>
 
           <div className="border-t border-zinc-800 pt-4 space-y-3">
             <h3 className="text-sm font-medium text-zinc-300">Pipeline / model scope</h3>
@@ -326,8 +332,11 @@ export default function AppDiscoveryProfilesPage() {
             <p className="text-[11px] text-zinc-600">Optional. Used by NaaP-style orchestrator discovery.</p>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">topN</label>
+                <label htmlFor="discovery-topN" className="block text-[11px] text-zinc-500 mb-0.5">
+                  topN
+                </label>
                 <input
+                  id="discovery-topN"
                   type="number"
                   min={1}
                   max={1000}
@@ -339,8 +348,11 @@ export default function AppDiscoveryProfilesPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">sortBy</label>
+                <label htmlFor="discovery-sortBy" className="block text-[11px] text-zinc-500 mb-0.5">
+                  sortBy
+                </label>
                 <select
+                  id="discovery-sortBy"
                   value={form.discoverySortBy}
                   onChange={(e) => setForm({ ...form, discoverySortBy: e.target.value })}
                   disabled={!canEdit}
@@ -355,8 +367,11 @@ export default function AppDiscoveryProfilesPage() {
                 </select>
               </div>
               <div className="col-span-2">
-                <label className="block text-[11px] text-zinc-500 mb-0.5">slaMinScore (0–1)</label>
+                <label htmlFor="discovery-sla-min" className="block text-[11px] text-zinc-500 mb-0.5">
+                  slaMinScore (0–1)
+                </label>
                 <input
+                  id="discovery-sla-min"
                   type="number"
                   min={0}
                   max={1}
@@ -371,8 +386,11 @@ export default function AppDiscoveryProfilesPage() {
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">GPU RAM min (GB)</label>
+                <label htmlFor="discovery-gpu-ram-min" className="block text-[11px] text-zinc-500 mb-0.5">
+                  GPU RAM min (GB)
+                </label>
                 <input
+                  id="discovery-gpu-ram-min"
                   type="number"
                   min={0}
                   value={form.discoveryGpuRamGbMin}
@@ -382,8 +400,11 @@ export default function AppDiscoveryProfilesPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">GPU RAM max (GB)</label>
+                <label htmlFor="discovery-gpu-ram-max" className="block text-[11px] text-zinc-500 mb-0.5">
+                  GPU RAM max (GB)
+                </label>
                 <input
+                  id="discovery-gpu-ram-max"
                   type="number"
                   min={0}
                   value={form.discoveryGpuRamGbMax}
@@ -393,8 +414,11 @@ export default function AppDiscoveryProfilesPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">price max</label>
+                <label htmlFor="discovery-price-max" className="block text-[11px] text-zinc-500 mb-0.5">
+                  price max
+                </label>
                 <input
+                  id="discovery-price-max"
                   type="number"
                   min={0}
                   step="0.0001"
@@ -405,8 +429,11 @@ export default function AppDiscoveryProfilesPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-zinc-500 mb-0.5">max avg latency (ms)</label>
+                <label htmlFor="discovery-max-avg-latency-ms" className="block text-[11px] text-zinc-500 mb-0.5">
+                  max avg latency (ms)
+                </label>
                 <input
+                  id="discovery-max-avg-latency-ms"
                   type="number"
                   min={0}
                   value={form.discoveryMaxAvgLatencyMs}
@@ -416,8 +443,11 @@ export default function AppDiscoveryProfilesPage() {
                 />
               </div>
               <div className="col-span-2">
-                <label className="block text-[11px] text-zinc-500 mb-0.5">max swap ratio (0–1)</label>
+                <label htmlFor="discovery-max-swap-ratio" className="block text-[11px] text-zinc-500 mb-0.5">
+                  max swap ratio (0–1)
+                </label>
                 <input
+                  id="discovery-max-swap-ratio"
                   type="number"
                   min={0}
                   max={1}

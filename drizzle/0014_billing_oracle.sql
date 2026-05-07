@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS "usage_billing_events" (
 );
 
 --> statement-breakpoint
+ALTER TABLE "usage_billing_events"
+  ADD CONSTRAINT "usage_billing_events_client_id_developer_apps_id_fk"
+  FOREIGN KEY ("client_id") REFERENCES "public"."developer_apps"("id") ON DELETE no action ON UPDATE no action;
+
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "idx_usage_billing_events_usage_record_id"
   ON "usage_billing_events" ("usage_record_id")
   WHERE "usage_record_id" IS NOT NULL;

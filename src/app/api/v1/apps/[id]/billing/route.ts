@@ -138,6 +138,7 @@ export async function GET(
           )
       : [];
 
+  let totalNetworkFeeWei = 0n;
   let totalNetworkFeeUsdMicros = 0n;
   let totalPlatformFeeUsdMicros = 0n;
   let totalOwnerChargeWei = 0n;
@@ -156,6 +157,7 @@ export async function GET(
   }>();
 
   for (const e of billingEvents) {
+    totalNetworkFeeWei += BigInt(e.networkFeeWei);
     totalNetworkFeeUsdMicros += BigInt(e.networkFeeUsdMicros);
     totalPlatformFeeUsdMicros += BigInt(e.platformFeeUsdMicros);
     totalOwnerChargeWei += BigInt(e.ownerChargeWei);
@@ -255,8 +257,8 @@ export async function GET(
       timeline,
       overage: { overageUnits, overageWei },
       ownerCost: {
-        networkFeeWei: totalFeeWei.toString(),
-        networkFeeEth: weiToEthString(totalFeeWei),
+        networkFeeWei: totalNetworkFeeWei.toString(),
+        networkFeeEth: weiToEthString(totalNetworkFeeWei),
         networkFeeUsdMicros: totalNetworkFeeUsdMicros.toString(),
         platformFeeUsdMicros: totalPlatformFeeUsdMicros.toString(),
         ownerChargeWei: totalOwnerChargeWei.toString(),

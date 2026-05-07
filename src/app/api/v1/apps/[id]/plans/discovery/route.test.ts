@@ -11,7 +11,9 @@ import {
 run("plans discovery GET allows M2M for own app and returns active plans", async (t) => {
   const { GET } = await import("./route");
   const app = await seedDeveloperAppWithClient({ status: "approved" });
-  t.after(() => cleanupTestApp(app));
+  t.after(async () => {
+    await cleanupTestApp(app);
+  });
 
   const { db } = await import("@/db/index");
   const { plans, planCapabilityBundles, discoveryProfiles, discoveryProfileBundles } =
@@ -81,9 +83,8 @@ run("plans discovery GET denies M2M for another app id", async (t) => {
   const { GET } = await import("./route");
   const app = await seedDeveloperAppWithClient({ status: "approved" });
   const other = await seedDeveloperAppWithClient({ status: "approved" });
-  t.after(() => {
-    cleanupTestApp(app);
-    cleanupTestApp(other);
+  t.after(async () => {
+    await Promise.all([cleanupTestApp(app), cleanupTestApp(other)]);
   });
 
   const res = await GET(

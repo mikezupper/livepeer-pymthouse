@@ -79,6 +79,16 @@ export async function resolvePlansDiscoveryForApp(
       .set(bundleLookupKey(row.pipeline, row.modelId), row);
   }
 
+  const bundlesByPlan = new Map<string, (typeof billingBundles)[number][]>();
+  for (const b of billingBundles) {
+    const list = bundlesByPlan.get(b.planId);
+    if (list) {
+      list.push(b);
+    } else {
+      bundlesByPlan.set(b.planId, [b]);
+    }
+  }
+
   return planRows.map((plan) => {
     const prof = plan.discoveryProfileId ? profById.get(plan.discoveryProfileId) : undefined;
     const planLevel = prof ? discoveryPolicyFromDb(prof.policy) : null;
@@ -86,9 +96,8 @@ export async function resolvePlansDiscoveryForApp(
       ? discByProfile.get(plan.discoveryProfileId)
       : undefined;
 
-    const capabilities: ResolvedPlanCapability[] = billingBundles
-      .filter((b) => b.planId === plan.id)
-      .map((bundle) => {
+    const capabilities: ResolvedPlanCapability[] = (bundlesByPlan.get(plan.id) ?? []).map(
+      (bundle) => {
         const discRow = dMap?.get(bundleLookupKey(bundle.pipeline, bundle.modelId));
         return {
           id: bundle.id,
@@ -103,7 +112,8 @@ export async function resolvePlansDiscoveryForApp(
           createdAt: bundle.createdAt,
           discoveryPolicy: discRow ? discoveryPolicyFromDb(discRow.discoveryPolicy) : null,
         };
-      });
+      },
+    );
 
     return {
       plan,

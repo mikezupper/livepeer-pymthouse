@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { formatIntegerString, weiHumanWithUnit } from "@/lib/format-wei";
+import { formatUsdMicrosString } from "@/lib/format-usd-micros";
 
 interface StreamSessionRow {
   id: string;
@@ -101,71 +102,70 @@ export default function StreamSessionTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-zinc-800/50">
-          {orderedSessions.map((s) => (
-            <tr
-              key={s.id}
-              className="hover:bg-zinc-900/50 transition-colors"
-            >
-              <td className="py-3 px-4 font-mono text-zinc-300 text-xs">
-                {s.manifestId.length > 16
-                  ? `${s.manifestId.slice(0, 8)}...${s.manifestId.slice(-4)}`
-                  : s.manifestId}
-              </td>
-              <td className="py-3 px-4 text-xs">
-                {s.validatedPipeline ? (
-                  <div>
-                    <span className="text-zinc-200">{s.validatedPipeline}</span>
-                    {s.validatedModelId && (
-                      <div className="text-zinc-500 truncate max-w-[120px]" title={s.validatedModelId}>
-                        {s.validatedModelId}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-zinc-600">—</span>
-                )}
-              </td>
-              <td className="py-3 px-4 font-mono text-zinc-400 text-xs">
-                {truncateAddress(s.orchestratorAddress)}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-400 font-mono text-xs">
-                {s.pricePerUnit != null && s.pricePerUnit !== ""
-                  ? weiHumanWithUnit(s.pricePerUnit)
-                  : "—"}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-400 font-mono text-xs">
-                {formatIntegerString(s.pixelsPerUnit) ?? "—"}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-300 tabular-nums">
-                {s.signerPaymentCount.toLocaleString()}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-300 font-mono text-xs">
-                {weiHumanWithUnit(s.totalFeeWei)}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-300 font-mono text-xs">
-                {s.totalNetworkFeeUsdMicros ? (
-                  <span>${(parseInt(s.totalNetworkFeeUsdMicros, 10) / 1_000_000).toFixed(6)}</span>
-                ) : (
-                  <span className="text-zinc-600">—</span>
-                )}
-              </td>
-              <td className="py-3 px-4 text-center">
-                <span
-                  className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                    statusBadge[s.status] || statusBadge.ended
-                  }`}
-                >
-                  {s.status}
-                </span>
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-500 text-xs">
-                {timeAgo(s.startedAt)}
-              </td>
-              <td className="py-3 px-4 text-right text-zinc-500 text-xs">
-                {s.lastPaymentAt ? timeAgo(s.lastPaymentAt) : "-"}
-              </td>
-            </tr>
-          ))}
+          {orderedSessions.map((s) => {
+            const feeUsd = formatUsdMicrosString(s.totalNetworkFeeUsdMicros ?? null, 6);
+            return (
+              <tr
+                key={s.id}
+                className="hover:bg-zinc-900/50 transition-colors"
+              >
+                <td className="py-3 px-4 font-mono text-zinc-300 text-xs">
+                  {s.manifestId.length > 16
+                    ? `${s.manifestId.slice(0, 8)}...${s.manifestId.slice(-4)}`
+                    : s.manifestId}
+                </td>
+                <td className="py-3 px-4 text-xs">
+                  {s.validatedPipeline ? (
+                    <div>
+                      <span className="text-zinc-200">{s.validatedPipeline}</span>
+                      {s.validatedModelId && (
+                        <div className="text-zinc-500 truncate max-w-[120px]" title={s.validatedModelId}>
+                          {s.validatedModelId}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-zinc-600">—</span>
+                  )}
+                </td>
+                <td className="py-3 px-4 font-mono text-zinc-400 text-xs">
+                  {truncateAddress(s.orchestratorAddress)}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-400 font-mono text-xs">
+                  {s.pricePerUnit != null && s.pricePerUnit !== ""
+                    ? weiHumanWithUnit(s.pricePerUnit)
+                    : "—"}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-400 font-mono text-xs">
+                  {formatIntegerString(s.pixelsPerUnit) ?? "—"}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-300 tabular-nums">
+                  {s.signerPaymentCount.toLocaleString()}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-300 font-mono text-xs">
+                  {weiHumanWithUnit(s.totalFeeWei)}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-300 font-mono text-xs">
+                  {feeUsd ? <span>{feeUsd}</span> : <span className="text-zinc-600">—</span>}
+                </td>
+                <td className="py-3 px-4 text-center">
+                  <span
+                    className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                      statusBadge[s.status] || statusBadge.ended
+                    }`}
+                  >
+                    {s.status}
+                  </span>
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-500 text-xs">
+                  {timeAgo(s.startedAt)}
+                </td>
+                <td className="py-3 px-4 text-right text-zinc-500 text-xs">
+                  {s.lastPaymentAt ? timeAgo(s.lastPaymentAt) : "-"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

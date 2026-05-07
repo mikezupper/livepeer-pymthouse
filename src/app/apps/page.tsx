@@ -134,6 +134,7 @@ function CopyPublicAppIdButton({
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -146,11 +147,20 @@ function CopyPublicAppIdButton({
 
   const copy = useCallback(() => {
     if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setCopyFailed(true);
+      if (timeoutRef.current !== null) {
+        clearTimeout(timeoutRef.current);
+      }
+      timeoutRef.current = setTimeout(() => {
+        timeoutRef.current = null;
+        setCopyFailed(false);
+      }, 2000);
       return;
     }
 
     void navigator.clipboard.writeText(clientId).then(
       () => {
+        setCopyFailed(false);
         setCopied(true);
         if (timeoutRef.current !== null) {
           clearTimeout(timeoutRef.current);
@@ -161,7 +171,14 @@ function CopyPublicAppIdButton({
         }, 2000);
       },
       () => {
-        /* ignore */
+        setCopyFailed(true);
+        if (timeoutRef.current !== null) {
+          clearTimeout(timeoutRef.current);
+        }
+        timeoutRef.current = setTimeout(() => {
+          timeoutRef.current = null;
+          setCopyFailed(false);
+        }, 2000);
       },
     );
   }, [clientId]);
@@ -171,7 +188,9 @@ function CopyPublicAppIdButton({
       type="button"
       onClick={copy}
       className={`pointer-events-auto relative z-10 shrink-0 rounded-md border border-zinc-700 bg-zinc-800 p-1.5 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors ${className ?? ""}`}
-      aria-label={copied ? "Copied" : "Copy public app id"}
+      aria-label={
+        copied ? "Copied" : copyFailed ? "Copy failed" : "Copy public app id"
+      }
     >
       {copied ? (
         <svg
@@ -299,7 +318,7 @@ export default function AppsPage() {
                         </h3>
                       </div>
                       {app.clientId ? (
-                        <div className="mt-2 space-y-1">
+                        <div className="mt-2 space-y-1 pointer-events-auto">
                           <div className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                             Public app id
                           </div>

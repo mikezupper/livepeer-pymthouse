@@ -24,6 +24,7 @@ function parseDiscoveryProfileCapabilities(input: unknown): {
     return { capabilities: [], error: "capabilities must be an array" };
   }
   try {
+    const seen = new Set<string>();
     const capabilities = input.map((raw, index) => {
       const value = (raw ?? {}) as Record<string, unknown>;
       const pipeline = typeof value.pipeline === "string" ? value.pipeline.trim() : "";
@@ -34,6 +35,13 @@ function parseDiscoveryProfileCapabilities(input: unknown): {
       if (!modelId) {
         throw new Error(`capabilities[${index}].modelId is required`);
       }
+      const capKey = `${pipeline}::${modelId}`;
+      if (seen.has(capKey)) {
+        throw new Error(
+          `duplicate capability at capabilities[${index}] for pipeline "${pipeline}" and modelId "${modelId}"`,
+        );
+      }
+      seen.add(capKey);
       const dp = parseDiscoveryPolicyInput(
         value.discoveryPolicy,
         `capabilities[${index}].discoveryPolicy`,
@@ -121,12 +129,16 @@ export async function PUT(
     return appEditForbiddenResponse();
   }
 
-  let body: Record<string, unknown>;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+  }
+  const record = body as Record<string, unknown>;
 
   const appId = auth.app.id;
   const existingRows = await db
@@ -140,7 +152,7 @@ export async function PUT(
   }
 
   const name =
-    body.name !== undefined ? String(body.name || "").trim() : existing.name;
+    record.name !== undefined ? String(record.name || "").trim() : existing.name;
   if (!name) {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
   }
@@ -153,8 +165,8 @@ export async function PUT(
     policy?: DiscoveryPolicy | null;
   } = { name, updatedAt: now };
 
-  if (body.policy !== undefined) {
-    const r = parseDiscoveryPolicyInput(body.policy, "policy");
+  if (record.policy !== undefined) {
+    const r = parseDiscoveryPolicyInput(record.policy, "policy");
     if (!r.ok) {
       return NextResponse.json({ error: r.error }, { status: 400 });
     }
@@ -162,8 +174,8 @@ export async function PUT(
   }
 
   let parsedCaps: ReturnType<typeof parseDiscoveryProfileCapabilities> | null = null;
-  if (body.capabilities !== undefined) {
-    parsedCaps = parseDiscoveryProfileCapabilities(body.capabilities);
+  if (record.capabilities !== undefined) {
+    parsedCaps = parseDiscoveryProfileCapabilities(record.capabilities);
     if (parsedCaps.error) {
       return NextResponse.json({ error: parsedCaps.error }, { status: 400 });
     }

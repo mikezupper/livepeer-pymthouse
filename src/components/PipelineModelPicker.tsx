@@ -25,6 +25,7 @@ export default function PipelineModelPicker({
   disabled = false,
 }: PipelineModelPickerProps) {
   const inputId = useId();
+  const listboxId = `${inputId}-listbox`;
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
@@ -149,6 +150,7 @@ export default function PipelineModelPicker({
         id={inputId}
         role="combobox"
         aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
         aria-autocomplete="list"
         value={open ? filter : ""}
         placeholder={disabled ? "" : "Search pipelines and models…"}
@@ -168,6 +170,7 @@ export default function PipelineModelPicker({
 
       {open && (
         <div
+          id={listboxId}
           role="listbox"
           aria-multiselectable="true"
           className="absolute z-50 mt-1 w-full max-h-72 overflow-auto rounded-lg border border-zinc-700 bg-zinc-900 py-1 shadow-lg"

@@ -24,6 +24,7 @@ function parseDiscoveryProfileCapabilities(input: unknown): {
     return { capabilities: [], error: "capabilities must be an array" };
   }
   try {
+    const seen = new Set<string>();
     const capabilities = input.map((raw, index) => {
       const value = (raw ?? {}) as Record<string, unknown>;
       const pipeline = typeof value.pipeline === "string" ? value.pipeline.trim() : "";
@@ -34,6 +35,13 @@ function parseDiscoveryProfileCapabilities(input: unknown): {
       if (!modelId) {
         throw new Error(`capabilities[${index}].modelId is required`);
       }
+      const capKey = `${pipeline}::${modelId}`;
+      if (seen.has(capKey)) {
+        throw new Error(
+          `duplicate capability at capabilities[${index}] for pipeline "${pipeline}" and modelId "${modelId}"`,
+        );
+      }
+      seen.add(capKey);
       const dp = parseDiscoveryPolicyInput(
         value.discoveryPolicy,
         `capabilities[${index}].discoveryPolicy`,
@@ -113,24 +121,28 @@ export async function POST(
     return appEditForbiddenResponse();
   }
 
-  let body: Record<string, unknown>;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+  }
+  const record = body as Record<string, unknown>;
 
-  const name = String(body.name || "").trim();
+  const name = String(record.name || "").trim();
   if (!name) {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
   }
 
-  const policyParsed = parseDiscoveryPolicyInput(body.policy, "policy");
+  const policyParsed = parseDiscoveryPolicyInput(record.policy, "policy");
   if (!policyParsed.ok) {
     return NextResponse.json({ error: policyParsed.error }, { status: 400 });
   }
 
-  const parsedCaps = parseDiscoveryProfileCapabilities(body.capabilities);
+  const parsedCaps = parseDiscoveryProfileCapabilities(record.capabilities);
   if (parsedCaps.error) {
     return NextResponse.json({ error: parsedCaps.error }, { status: 400 });
   }

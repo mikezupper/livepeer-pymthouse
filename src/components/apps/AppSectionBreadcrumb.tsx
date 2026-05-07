@@ -9,7 +9,7 @@ interface Props {
 }
 
 /**
- * In-app navigation: My Apps → … → current section (Plans or Discovery profiles).
+ * In-app navigation: My Apps → … → Plans and Discovery profiles (sibling sections).
  */
 export default function AppSectionBreadcrumb({ appId, appName, current }: Props) {
   return (
@@ -24,22 +24,28 @@ export default function AppSectionBreadcrumb({ appId, appName, current }: Props)
       <span className="mx-1.5 text-zinc-600" aria-hidden>
         /
       </span>
-      {current === "plans" ? (
-        <span className="text-zinc-200 font-medium">Plans</span>
-      ) : (
-        <>
-          <Link
-            href={`/apps/${appId}/plans`}
-            className="hover:text-zinc-300 transition-colors"
-          >
+      <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        {current === "plans" ? (
+          <span className="text-zinc-200 font-medium">Plans</span>
+        ) : (
+          <Link href={`/apps/${appId}/plans`} className="hover:text-zinc-300 transition-colors">
             Plans
           </Link>
-          <span className="mx-1.5 text-zinc-600" aria-hidden>
-            /
-          </span>
+        )}
+        <span className="text-zinc-600" aria-hidden>
+          ·
+        </span>
+        {current === "discovery-profiles" ? (
           <span className="text-zinc-200 font-medium">Discovery profiles</span>
-        </>
-      )}
+        ) : (
+          <Link
+            href={`/apps/${appId}/discovery-profiles`}
+            className="hover:text-zinc-300 transition-colors"
+          >
+            Discovery profiles
+          </Link>
+        )}
+      </span>
     </nav>
   );
 }

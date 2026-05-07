@@ -56,7 +56,9 @@ function parseCatalogEntry(raw: unknown, index: number): PipelineCatalogEntry | 
   const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : null;
   if (!id || !name) return null;
   const models = Array.isArray(r.models)
-    ? (r.models as unknown[]).filter((m): m is string => typeof m === "string" && m.trim() !== "")
+    ? (r.models as unknown[])
+        .filter((m): m is string => typeof m === "string" && m.trim() !== "")
+        .map((m) => m.trim())
     : [];
   const regions = Array.isArray(r.regions)
     ? (r.regions as unknown[]).filter((m): m is string => typeof m === "string" && m.trim() !== "")

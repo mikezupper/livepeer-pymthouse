@@ -7,6 +7,7 @@ import {
   formatBillingWei,
   getBillingUsageDashboardData,
 } from "@/lib/billing-usage-dashboard-data";
+import { formatUsdMicrosString } from "@/lib/format-usd-micros";
 
 export default async function BillingUsageDashboard({
   filterAppId,
@@ -186,17 +187,13 @@ export default async function BillingUsageDashboard({
                     <div className="min-w-0">
                       <p className="text-[11px] uppercase tracking-wider text-zinc-500">Network fee (USD)</p>
                       <p className="text-sm font-semibold text-emerald-400 font-mono break-all">
-                        {entry.networkFeeUsdMicros !== "0"
-                          ? `$${(parseInt(entry.networkFeeUsdMicros, 10) / 1_000_000).toFixed(4)}`
-                          : "—"}
+                        {formatUsdMicrosString(entry.networkFeeUsdMicros, 4) ?? "—"}
                       </p>
                     </div>
                     <div className="min-w-0">
                       <p className="text-[11px] uppercase tracking-wider text-zinc-500">Billable (USD)</p>
                       <p className="text-sm font-semibold text-zinc-200 font-mono break-all">
-                        {entry.endUserBillableUsdMicros !== "0"
-                          ? `$${(parseInt(entry.endUserBillableUsdMicros, 10) / 1_000_000).toFixed(4)}`
-                          : "—"}
+                        {formatUsdMicrosString(entry.endUserBillableUsdMicros, 4) ?? "—"}
                       </p>
                     </div>
                   </div>
@@ -206,7 +203,7 @@ export default async function BillingUsageDashboard({
                         <span
                           key={`${pm.pipeline}|${pm.modelId}`}
                           className="text-xs bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded"
-                          title={`${pm.requestCount} requests · $${(Number(pm.networkFeeUsdMicros) / 1_000_000).toFixed(6)} USD`}
+                          title={`${pm.requestCount} requests · ${formatUsdMicrosString(pm.networkFeeUsdMicros, 6) ?? "—"}`}
                         >
                           {pm.pipeline} / {pm.modelId.length > 20 ? `${pm.modelId.slice(0, 18)}…` : pm.modelId}
                         </span>

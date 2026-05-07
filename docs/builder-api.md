@@ -564,7 +564,7 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 - Map one external user identifier to one Builder API user record.
 - Migrate away from legacy `/api/v1/naap/*` routes to OIDC + Builder APIs.
 - For usage attribution, populate `usage_records.user_id` when a request maps to a provisioned user; store fees as decimal wei strings.
-- For pipeline/model billing, supply `pipeline` and `modelId` (via `python-gateway` metadata envelope or direct API fields) so PymtHouse can validate the signed ticket price against NaaP advertised pricing and create trusted `usage_billing_events` rows.
+- For pipeline/model billing, negotiated-ticket evidence is captured through the `/generate-live-payment` flow (or via the `python-gateway` metadata envelope). PymtHouse records `usage_billing_events` after off-path or asynchronous reconciliation of that evidence, while billing totals and plan management remain available via `GET /api/v1/apps/{clientId}/billing` and `/plans` respectively.
 - For billing dashboards, call `GET /api/v1/apps/{clientId}/billing` for cycle totals, timeline, overage, and USD breakdown; manage plans via `/plans` from a trusted operator session.
 - Use `groupBy=pipeline_model` on the Usage API to get per-pipeline/model ETH and USD breakdown.
 - Ensure `(client_id, request_id)` uniqueness for usage rows where applicable.

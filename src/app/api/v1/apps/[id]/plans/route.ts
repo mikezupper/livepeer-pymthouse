@@ -210,12 +210,13 @@ function parseCapabilities(input: unknown): {
     }
 
     const rawUpcharge = value.upchargePercentBps;
-    const parsedUpchargeBps =
-      rawUpcharge === null || rawUpcharge === undefined
-        ? null
-        : parseInt(String(rawUpcharge), 10);
-    if (parsedUpchargeBps !== null && (!Number.isInteger(parsedUpchargeBps) || parsedUpchargeBps < 0)) {
-      throw new Error(`capabilities[${index}].upchargePercentBps must be a non-negative integer`);
+    let parsedUpchargeBps: number | null = null;
+    if (rawUpcharge !== null && rawUpcharge !== undefined) {
+      const n = typeof rawUpcharge === "number" ? rawUpcharge : Number(String(rawUpcharge).trim());
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(`capabilities[${index}].upchargePercentBps must be a non-negative integer`);
+      }
+      parsedUpchargeBps = n;
     }
 
     return {
@@ -526,8 +527,12 @@ export async function PUT(
           billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
         overageRateWei:
           billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
-        ...(generalUpchargePut.value !== null ? { generalUpchargePercentBps: generalUpchargePut.value } : {}),
-        ...(payPerUseUpchargePut.value !== null ? { payPerUseUpchargePercentBps: payPerUseUpchargePut.value } : {}),
+        ...(body.generalUpchargePercentBps !== undefined
+          ? { generalUpchargePercentBps: generalUpchargePut.value }
+          : {}),
+        ...(body.payPerUseUpchargePercentBps !== undefined
+          ? { payPerUseUpchargePercentBps: payPerUseUpchargePut.value }
+          : {}),
         ...(includedUsdMicrosPut !== undefined ? { includedUsdMicros: includedUsdMicrosPut } : {}),
         ...(body.billingCycle !== undefined ? { billingCycle: String(body.billingCycle) } : {}),
         ...(discoveryProfileIdPut !== undefined
