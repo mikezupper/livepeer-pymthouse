@@ -2,15 +2,51 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { db } from "@/db/index";
-import { planCapabilityBundles, plans } from "@/db/schema";
+import { discoveryProfiles, planCapabilityBundles, plans } from "@/db/schema";
+import { authenticateAppClient } from "@/lib/auth";
 import {
   canEditProviderApp,
   getAuthorizedProviderApp,
+  getProviderApp,
   appEditForbiddenResponse,
 } from "@/lib/provider-apps";
+import { resolvePlansDiscoveryForApp } from "@/lib/discovery-profile-resolve";
+
+async function requireOwnedDiscoveryProfile(
+  appId: string,
+  discoveryProfileId: string | null,
+  executor: Pick<typeof db, "select"> = db,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (discoveryProfileId === null) {
+    return { ok: true };
+  }
+  const row = await executor
+    .select({ id: discoveryProfiles.id })
+    .from(discoveryProfiles)
+    .where(
+      and(eq(discoveryProfiles.id, discoveryProfileId), eq(discoveryProfiles.clientId, appId)),
+    )
+    .limit(1);
+  if (!row[0]) {
+    return { ok: false, error: "discoveryProfileId not found for this app" };
+  }
+  return { ok: true };
+}
 
 function isNonNegativeIntegerString(s: string): boolean {
   return /^\d+$/.test(s);
+}
+
+function parseOptionalNonNegativeBps(
+  raw: unknown,
+  fieldName: string,
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 0) {
+    return { ok: false, error: `${fieldName} must be a non-negative integer (basis points)` };
+  }
+  return { ok: true, value: n };
 }
 
 /** Present empty → null; present non-empty must match non-negative integer digits. */
@@ -130,6 +166,7 @@ function parseCapabilities(input: unknown): {
     slaTargetScore: number | null;
     slaTargetP95Ms: number | null;
     maxPricePerUnit: string | null;
+    upchargePercentBps: number | null;
   }>;
   error?: string;
 } {
@@ -173,6 +210,16 @@ function parseCapabilities(input: unknown): {
       throw new Error(`capabilities[${index}].slaTargetP95Ms must be numeric`);
     }
 
+    const rawUpcharge = value.upchargePercentBps;
+    let parsedUpchargeBps: number | null = null;
+    if (rawUpcharge !== null && rawUpcharge !== undefined) {
+      const n = typeof rawUpcharge === "number" ? rawUpcharge : Number(String(rawUpcharge).trim());
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(`capabilities[${index}].upchargePercentBps must be a non-negative integer`);
+      }
+      parsedUpchargeBps = n;
+    }
+
     return {
       pipeline,
       modelId,
@@ -182,48 +229,58 @@ function parseCapabilities(input: unknown): {
         value.maxPricePerUnit === null || value.maxPricePerUnit === undefined
           ? null
           : String(value.maxPricePerUnit),
+      upchargePercentBps: parsedUpchargeBps,
     };
   });
 
   return { capabilities };
 }
 
+async function resolveAppForPlansRead(clientId: string, request: NextRequest) {
+  const clientAuth = await authenticateAppClient(request);
+  if (clientAuth?.appId === clientId) {
+    const app = await getProviderApp(clientId);
+    return app;
+  }
+  const auth = await getAuthorizedProviderApp(clientId);
+  return auth?.app ?? null;
+}
+
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: clientId } = await params;
-  const auth = await getAuthorizedProviderApp(clientId);
-  if (!auth) {
+  const app = await resolveAppForPlansRead(clientId, request);
+  if (!app) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  const appId = auth.app.id;
+  const appId = app.id;
 
-  const rows = await db.select().from(plans).where(eq(plans.clientId, appId));
-  const bundles = await db
-    .select()
-    .from(planCapabilityBundles)
-    .where(eq(planCapabilityBundles.clientId, appId));
+  const resolved = await resolvePlansDiscoveryForApp(appId);
 
   return NextResponse.json({
-    plans: rows.map((plan) => ({
-      ...plan,
-      includedUnits:
-        plan.includedUnits !== null && plan.includedUnits !== undefined
-          ? plan.includedUnits.toString()
-          : null,
-      overageRateWei:
-        plan.overageRateWei !== null && plan.overageRateWei !== undefined
-          ? plan.overageRateWei.toString()
-          : null,
-      clientId,
-      capabilities: bundles
-        .filter((bundle) => bundle.planId === plan.id)
-        .map((bundle) => ({
-          ...bundle,
+    plans: resolved.map((r) => {
+      const plan = r.plan;
+      return {
+        ...plan,
+        discoveryProfileId: plan.discoveryProfileId ?? null,
+        discoveryPolicy: r.discoveryPolicy,
+        includedUnits:
+          plan.includedUnits !== null && plan.includedUnits !== undefined
+            ? plan.includedUnits.toString()
+            : null,
+        overageRateWei:
+          plan.overageRateWei !== null && plan.overageRateWei !== undefined
+            ? plan.overageRateWei.toString()
+            : null,
+        clientId,
+        capabilities: r.capabilities.map((c) => ({
+          ...c,
           clientId,
         })),
-    })),
+      };
+    }),
   });
 }
 
@@ -266,46 +323,99 @@ export async function POST(
     return NextResponse.json({ error: parsedCapabilities.error }, { status: 400 });
   }
 
+  const appId = auth.app.id;
+
+  let discoveryProfileId: string | null = null;
+  if (body.discoveryProfileId !== undefined) {
+    if (body.discoveryProfileId === null || body.discoveryProfileId === "") {
+      discoveryProfileId = null;
+    } else if (typeof body.discoveryProfileId === "string" && body.discoveryProfileId.trim()) {
+      discoveryProfileId = body.discoveryProfileId.trim();
+    } else {
+      return NextResponse.json(
+        { error: "discoveryProfileId must be a non-empty string or null" },
+        { status: 400 },
+      );
+    }
+  }
   const planType = String(body.type || "free");
   const billing = resolveBillingFieldsForPost(planType, body);
   if (!billing.ok) {
     return NextResponse.json({ error: billing.error }, { status: 400 });
   }
 
+  // Parse new USD/upcharge fields
+  const generalUpcharge = parseOptionalNonNegativeBps(body.generalUpchargePercentBps, "generalUpchargePercentBps");
+  if (!generalUpcharge.ok) return NextResponse.json({ error: generalUpcharge.error }, { status: 400 });
+  const payPerUseUpcharge = parseOptionalNonNegativeBps(body.payPerUseUpchargePercentBps, "payPerUseUpchargePercentBps");
+  if (!payPerUseUpcharge.ok) return NextResponse.json({ error: payPerUseUpcharge.error }, { status: 400 });
+
+  const rawIncludedUsd = body.includedUsdMicros;
+  let includedUsdMicros: string | null = null;
+  if (rawIncludedUsd !== undefined && rawIncludedUsd !== null) {
+    const s = String(rawIncludedUsd).trim();
+    if (s !== "" && !isNonNegativeIntegerString(s)) {
+      return NextResponse.json({ error: "includedUsdMicros must be a non-negative integer string" }, { status: 400 });
+    }
+    includedUsdMicros = s || null;
+  }
+
   const planId = uuidv4();
   const now = new Date().toISOString();
-  const appId = auth.app.id;
-  await db.transaction(async (tx) => {
-    await tx.insert(plans).values({
-      id: planId,
-      clientId: appId,
-      name,
-      type: planType,
-      priceAmount: String(body.priceAmount || "0"),
-      priceCurrency: String(body.priceCurrency || "USD"),
-      status: String(body.status || "active"),
-      includedUnits:
-        billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
-      overageRateWei:
-        billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    for (const capability of parsedCapabilities.capabilities) {
-      await tx.insert(planCapabilityBundles).values({
-        id: uuidv4(),
-        planId,
+  try {
+    await db.transaction(async (tx) => {
+      const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileId, tx);
+      if (!profCheck.ok) {
+        throw Object.assign(new Error(profCheck.error), { code: "DISCOVERY_PROFILE" as const });
+      }
+      await tx.insert(plans).values({
+        id: planId,
         clientId: appId,
-        pipeline: capability.pipeline,
-        modelId: capability.modelId,
-        slaTargetScore: capability.slaTargetScore ?? null,
-        slaTargetP95Ms: capability.slaTargetP95Ms ?? null,
-        maxPricePerUnit: capability.maxPricePerUnit,
+        name,
+        type: planType,
+        priceAmount: String(body.priceAmount || "0"),
+        priceCurrency: String(body.priceCurrency || "USD"),
+        status: String(body.status || "active"),
+        includedUnits:
+          billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
+        overageRateWei:
+          billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
+        includedUsdMicros,
+        generalUpchargePercentBps: generalUpcharge.value,
+        payPerUseUpchargePercentBps: payPerUseUpcharge.value,
+        billingCycle: typeof body.billingCycle === "string" ? body.billingCycle : "monthly",
+        discoveryProfileId,
         createdAt: now,
+        updatedAt: now,
       });
+
+      for (const capability of parsedCapabilities.capabilities) {
+        await tx.insert(planCapabilityBundles).values({
+          id: uuidv4(),
+          planId,
+          clientId: appId,
+          pipeline: capability.pipeline,
+          modelId: capability.modelId,
+          slaTargetScore: capability.slaTargetScore ?? null,
+          slaTargetP95Ms: capability.slaTargetP95Ms ?? null,
+          maxPricePerUnit: capability.maxPricePerUnit,
+          upchargePercentBps: capability.upchargePercentBps,
+          createdAt: now,
+        });
+      }
+    });
+  } catch (e: unknown) {
+    if (
+      e &&
+      typeof e === "object" &&
+      "code" in e &&
+      (e as { code?: string }).code === "DISCOVERY_PROFILE" &&
+      e instanceof Error
+    ) {
+      return NextResponse.json({ error: e.message }, { status: 400 });
     }
-  });
+    throw e;
+  }
 
   return NextResponse.json({ id: planId }, { status: 201 });
 }
@@ -339,6 +449,19 @@ export async function PUT(
     return NextResponse.json({ error: "id is required" }, { status: 400 });
   }
 
+  let discoveryProfileIdPut: string | null | undefined = undefined;
+  if (body.discoveryProfileId !== undefined) {
+    if (body.discoveryProfileId === null || body.discoveryProfileId === "") {
+      discoveryProfileIdPut = null;
+    } else if (typeof body.discoveryProfileId === "string" && body.discoveryProfileId.trim()) {
+      discoveryProfileIdPut = body.discoveryProfileId.trim();
+    } else {
+      return NextResponse.json(
+        { error: "discoveryProfileId must be a non-empty string or null" },
+        { status: 400 },
+      );
+    }
+  }
   let parsedCapabilities: ReturnType<typeof parseCapabilities> | null = null;
   if (body.capabilities !== undefined) {
     try {
@@ -367,6 +490,13 @@ export async function PUT(
       return { tag: "notfound" as const };
     }
 
+    if (discoveryProfileIdPut !== undefined && discoveryProfileIdPut !== null) {
+      const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileIdPut, tx);
+      if (!profCheck.ok) {
+        return { tag: "validation" as const, error: profCheck.error };
+      }
+    }
+
     const nextType = body.type !== undefined ? String(body.type) : existing.type;
     const billing = resolveBillingFieldsForPut(nextType, body, {
       includedUnits:
@@ -376,6 +506,26 @@ export async function PUT(
     });
     if (!billing.ok) {
       return { tag: "validation" as const, error: billing.error };
+    }
+
+    // Parse new USD/upcharge fields for PUT
+    const generalUpchargePut = parseOptionalNonNegativeBps(body.generalUpchargePercentBps, "generalUpchargePercentBps");
+    if (!generalUpchargePut.ok) return { tag: "validation" as const, error: generalUpchargePut.error };
+    const payPerUseUpchargePut = parseOptionalNonNegativeBps(body.payPerUseUpchargePercentBps, "payPerUseUpchargePercentBps");
+    if (!payPerUseUpchargePut.ok) return { tag: "validation" as const, error: payPerUseUpchargePut.error };
+
+    const rawIncludedUsdPut = body.includedUsdMicros;
+    let includedUsdMicrosPut: string | null | undefined = undefined; // undefined = don't change
+    if (rawIncludedUsdPut !== undefined) {
+      if (rawIncludedUsdPut === null) {
+        includedUsdMicrosPut = null;
+      } else {
+        const s = String(rawIncludedUsdPut).trim();
+        if (s !== "" && !isNonNegativeIntegerString(s)) {
+          return { tag: "validation" as const, error: "includedUsdMicros must be a non-negative integer string" };
+        }
+        includedUsdMicrosPut = s || null;
+      }
     }
 
     const updated = await tx
@@ -390,6 +540,17 @@ export async function PUT(
           billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
         overageRateWei:
           billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
+        ...(body.generalUpchargePercentBps !== undefined
+          ? { generalUpchargePercentBps: generalUpchargePut.value }
+          : {}),
+        ...(body.payPerUseUpchargePercentBps !== undefined
+          ? { payPerUseUpchargePercentBps: payPerUseUpchargePut.value }
+          : {}),
+        ...(includedUsdMicrosPut !== undefined ? { includedUsdMicros: includedUsdMicrosPut } : {}),
+        ...(body.billingCycle !== undefined ? { billingCycle: String(body.billingCycle) } : {}),
+        ...(discoveryProfileIdPut !== undefined
+          ? { discoveryProfileId: discoveryProfileIdPut }
+          : {}),
         updatedAt: now,
       })
       .where(and(eq(plans.id, planId), eq(plans.clientId, appId)))
@@ -418,6 +579,7 @@ export async function PUT(
           slaTargetScore: capability.slaTargetScore ?? null,
           slaTargetP95Ms: capability.slaTargetP95Ms ?? null,
           maxPricePerUnit: capability.maxPricePerUnit,
+          upchargePercentBps: capability.upchargePercentBps,
           createdAt: now,
         });
       }

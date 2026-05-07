@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import DashboardLayout from "@/components/DashboardLayout";
 import AppSettingsScreen from "@/components/apps/AppSettingsScreen";
 import type { AppFormData, AppState } from "@/components/apps/AppWizard";
@@ -17,7 +17,6 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
 
 export default function AppDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [appData, setAppData] = useState<{
     formData: Partial<AppFormData>;
@@ -129,41 +128,21 @@ export default function AppDetailPage() {
 
   return (
     <DashboardLayout>
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-8">
-        <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-bold text-zinc-100">
-              {appData.formData.name || "App"}
-            </h1>
-            <span
-              className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${statusInfo.color}`}
-            >
-              {statusInfo.label}
-            </span>
-          </div>
-          <p className="text-sm text-zinc-500 mt-1">
-            Edit integration settings, credentials, and run OIDC tests. The create
-            wizard is only used when you add a new app.
-          </p>
+      <div className="mb-8">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-2xl font-bold text-zinc-100">
+            {appData.formData.name || "App"}
+          </h1>
+          <span
+            className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${statusInfo.color}`}
+          >
+            {statusInfo.label}
+          </span>
         </div>
-        {appData.state.clientId && (
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => router.push("/billing")}
-              className="px-4 py-2 bg-zinc-700 text-zinc-200 rounded-lg text-sm hover:bg-zinc-600 transition-colors"
-            >
-              Billing &amp; usage
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/apps/${id}/plans`)}
-              className="px-4 py-2 bg-zinc-700 text-zinc-200 rounded-lg text-sm hover:bg-zinc-600 transition-colors"
-            >
-              Plans
-            </button>
-          </div>
-        )}
+        <p className="text-sm text-zinc-500 mt-1">
+          Edit integration settings, credentials, and run OIDC tests. The create
+          wizard is only used when you add a new app.
+        </p>
       </div>
 
       <AppSettingsScreen

@@ -1,13 +1,18 @@
 import { db } from "@/db/index";
 import {
+  appUsers,
   developerApps,
+  endUsers,
   oidcClients,
+  planCapabilityBundles,
+  plans,
   signerConfig,
   streamSessions,
   transactions,
+  usageBillingEvents,
   usageRecords,
 } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import {
   decodeOrchestratorInfo,
@@ -20,6 +25,15 @@ import { issueSignerDmzToken } from "./signer-dmz-token";
 import { getSenderInfo } from "./signer-cli";
 import { DOCKER_COMPOSE_LOCAL_SIGNER_SERVICE } from "./signer-local-compose";
 import { getIssuer } from "./oidc/issuer-urls";
+import { getEthUsdOracle } from "./prices/eth-usd-oracle";
+import {
+  resolvePaymentPipelineModelConstraint,
+  resolveGatewayAttribution,
+  buildSignedTicketConstraintHash,
+  resolveUpcharge,
+  computeUsdMicrosFromWei,
+  weiToEthString,
+} from "./billing-runtime";
 
 export interface ProxyResult {
   status: number;
@@ -63,6 +77,33 @@ export async function getSignerRoutingContext(authAppId?: string | null) {
   return { signer, providerAppId };
 }
 
+async function resolveUsageUserIdentifier(
+  auth: AuthResult,
+  providerAppId: string | null,
+): Promise<string | null> {
+  if (!providerAppId) return auth.userId || auth.endUserId || null;
+
+  if (auth.endUserId) {
+    const rows = await db
+      .select({ externalUserId: endUsers.externalUserId })
+      .from(endUsers)
+      .where(and(eq(endUsers.id, auth.endUserId), eq(endUsers.appId, providerAppId)))
+      .limit(1);
+    return rows[0]?.externalUserId || auth.endUserId;
+  }
+
+  if (auth.userId) {
+    const rows = await db
+      .select({ externalUserId: appUsers.externalUserId })
+      .from(appUsers)
+      .where(and(eq(appUsers.id, auth.userId), eq(appUsers.clientId, providerAppId)))
+      .limit(1);
+    return rows[0]?.externalUserId || auth.userId;
+  }
+
+  return null;
+}
+
 /**
  * Base URL for the signer **HTTP** API (what `forwardToSigner` calls).
  *
@@ -78,6 +119,14 @@ export async function getSignerRoutingContext(authAppId?: string | null) {
  * a "Unexpected token 'M'" JSON parse error in the proxy layer.
  */
 export function getSignerUrl(signer?: typeof signerConfig.$inferSelect | null): string {
+  const testSignerUrl =
+    process.env.NODE_ENV === "test"
+      ? process.env.PYMTHOUSE_TEST_SIGNER_URL
+      : undefined;
+  if (testSignerUrl && testSignerUrl.trim() !== "") {
+    return testSignerUrl.replace(/\/+$/, "");
+  }
+
   // 127.0.0.1 (not "localhost"): the docker-compose publish is bound to 127.0.0.1
   // only, and some hosts resolve "localhost" to an IPv6 or LAN IPv4 address via
   // nsswitch/mDNS, producing ECONNREFUSED even when the container is healthy.
@@ -354,31 +403,31 @@ function formatDmzTokenForLog(authz: string | undefined) {
 
 function pickConflictingStringAliases(
   body: Record<string, unknown>,
-  lowerKey: string,
-  pascalKey: string,
+  ...keys: string[]
 ):
   | { ok: true; value: string | undefined }
   | { ok: false; message: string } {
-  const rawLo = body[lowerKey];
-  const rawHi = body[pascalKey];
-  const definedLo = rawLo !== undefined && rawLo !== null && `${rawLo}`.length > 0;
-  const definedHi = rawHi !== undefined && rawHi !== null && `${rawHi}`.length > 0;
-  const lo = definedLo ? String(rawLo) : undefined;
-  const hi = definedHi ? String(rawHi) : undefined;
-  if (lo !== undefined && hi !== undefined && lo !== hi) {
+  const values = keys
+    .map((key) => {
+      const raw = body[key];
+      const defined = raw !== undefined && raw !== null && `${raw}`.length > 0;
+      return defined ? { key, value: String(raw) } : null;
+    })
+    .filter((entry): entry is { key: string; value: string } => entry !== null);
+  const first = values[0];
+  const conflict = values.find((entry) => entry.value !== first?.value);
+  if (first && conflict) {
     return {
       ok: false,
-      message: `Conflicting ${lowerKey} and ${pascalKey} in request body`,
+      message: `Conflicting ${keys.join("/")} in request body`,
     };
   }
-  const value = lo ?? hi;
-  return { ok: true, value };
+  return { ok: true, value: first?.value };
 }
 
 function pickConflictingNumberAliases(
   body: Record<string, unknown>,
-  lowerKey: string,
-  pascalKey: string,
+  ...keys: string[]
 ):
   | { ok: true; value: number | undefined }
   | { ok: false; message: string } {
@@ -390,15 +439,21 @@ function pickConflictingNumberAliases(
     }
     return undefined;
   };
-  const lo = parseNum(body[lowerKey]);
-  const hi = parseNum(body[pascalKey]);
-  if (lo !== undefined && hi !== undefined && lo !== hi) {
+  const values = keys
+    .map((key) => {
+      const value = parseNum(body[key]);
+      return value !== undefined ? { key, value } : null;
+    })
+    .filter((entry): entry is { key: string; value: number } => entry !== null);
+  const first = values[0];
+  const conflict = values.find((entry) => entry.value !== first?.value);
+  if (first && conflict) {
     return {
       ok: false,
-      message: `Conflicting ${lowerKey} and ${pascalKey} in request body`,
+      message: `Conflicting ${keys.join("/")} in request body`,
     };
   }
-  return { ok: true, value: lo ?? hi };
+  return { ok: true, value: first?.value };
 }
 
 /**
@@ -468,6 +523,7 @@ export async function proxyGenerateLivePayment(
     requestBody,
     "manifestId",
     "ManifestID",
+    "manifestID",
   );
   if (!manifestPick.ok) {
     return { status: 400, body: { error: manifestPick.message } };
@@ -484,11 +540,22 @@ export async function proxyGenerateLivePayment(
   }
   const inPixels = inPixelsPick.value;
 
+  const preloadSecondsPick = pickConflictingNumberAliases(
+    requestBody,
+    "preloadSeconds",
+    "PreloadSeconds",
+  );
+  if (!preloadSecondsPick.ok) {
+    return { status: 400, body: { error: preloadSecondsPick.message } };
+  }
+  const preloadSeconds = preloadSecondsPick.value;
+
   const jobTypePick = pickConflictingStringAliases(requestBody, "type", "Type");
   if (!jobTypePick.ok) {
     return { status: 400, body: { error: jobTypePick.message } };
   }
   const jobType = jobTypePick.value;
+  const normalizedJobType = jobType?.trim().toLowerCase();
 
   const orchPick = pickConflictingStringAliases(
     requestBody,
@@ -523,8 +590,10 @@ export async function proxyGenerateLivePayment(
   let pixels: bigint;
   if (inPixels && inPixels > 0) {
     pixels = BigInt(inPixels);
-  } else if (jobType === "lv2v") {
+  } else if (normalizedJobType === "lv2v") {
     pixels = calculateLv2vPixels(1);
+  } else if (normalizedJobType === "byoc" && preloadSeconds && preloadSeconds > 0) {
+    pixels = BigInt(Math.ceil(preloadSeconds));
   } else {
     pixels = 0n;
   }
@@ -534,6 +603,7 @@ export async function proxyGenerateLivePayment(
     feeWei,
     signer.defaultCutPercent
   );
+  const usageUserId = await resolveUsageUserIdentifier(auth, providerAppId);
   const nowIso = new Date().toISOString();
   let streamSessionId: string | null = null;
 
@@ -573,7 +643,10 @@ export async function proxyGenerateLivePayment(
     }
   }
 
-  // Forward to go-livepeer
+  const constraint = await resolvePaymentPipelineModelConstraint(requestBody);
+  const attribution = resolveGatewayAttribution(requestBody);
+
+  // Forward first — signing must not depend on NaaP pricing availability.
   try {
     const { response } = await forwardToSigner(
       signer,
@@ -584,7 +657,35 @@ export async function proxyGenerateLivePayment(
     );
     const responseBody = await readSignerUpstreamBody(response);
 
-    if (response.ok && feeWei > 0n) {
+    if (response.ok) {
+      const orchAddrForConstraint =
+        orchestratorAddress && orchestratorAddress.length > 0
+          ? orchestratorAddress
+          : "0x";
+
+      const signedPriceStr = pricePerUnit.toString();
+      const signedPixelsStr = pixelsPerUnit.toString();
+      const pipelineModelConstraintHash =
+        constraint !== null
+          ? buildSignedTicketConstraintHash({
+              pipeline: constraint.pipeline,
+              modelId: constraint.modelId,
+              orchAddress: orchAddrForConstraint,
+              signedPriceWeiPerUnit: signedPriceStr,
+              signedPixelsPerUnit: signedPixelsStr,
+            })
+          : null;
+
+      let priceValidationStatus: string;
+      let priceValidationReason: string | undefined;
+      if (!constraint) {
+        priceValidationStatus = "missing_constraint";
+        priceValidationReason =
+          "No pipeline/model in request (add pipeline and modelId or capabilities with PerCapability models) for full attribution.";
+      } else {
+        priceValidationStatus = "matched";
+      }
+
       // Dedupe is per explicit RequestID only. Do NOT fall back to manifestId — the gateway
       // keeps one manifest for the whole LV2V session, so that would collapse every payment
       // into a single usage row and freeze signerPaymentCount at 1.
@@ -610,6 +711,59 @@ export async function proxyGenerateLivePayment(
       }
 
       if (!existingUsage) {
+        // Fetch ETH/USD oracle at signing time
+        const ethUsd = await getEthUsdOracle();
+
+        // Compute USD values from wei
+        const networkFeeUsdMicros = computeUsdMicrosFromWei(feeWei, ethUsd.priceUsd);
+        const ownerChargeWei = feeWei + platformCutWei;
+        const ownerPlatformFeeUsdMicros = computeUsdMicrosFromWei(platformCutWei, ethUsd.priceUsd);
+        const ownerChargeUsdMicros = computeUsdMicrosFromWei(ownerChargeWei, ethUsd.priceUsd);
+
+        // Resolve plan upcharge when we have a pipeline/model constraint.
+        let upchargeResult: {
+          bps: number;
+          source: "pipeline_model" | "general" | "pay_per_use" | "subscription_included" | "unpriced";
+        } = { bps: 0, source: "unpriced" as const };
+        if (providerAppId && constraint) {
+          try {
+            const planRows = await db
+              .select()
+              .from(plans)
+              .where(and(eq(plans.clientId, providerAppId), eq(plans.status, "active")))
+              .orderBy(desc(plans.updatedAt))
+              .limit(1);
+            const bundleRows = planRows[0]
+              ? await db
+                  .select()
+                  .from(planCapabilityBundles)
+                  .where(
+                    and(
+                      eq(planCapabilityBundles.planId, planRows[0].id),
+                      eq(planCapabilityBundles.clientId, providerAppId),
+                    ),
+                  )
+              : [];
+            upchargeResult = resolveUpcharge({
+              plan: planRows[0] ?? null,
+              bundles: bundleRows,
+              pipeline: constraint.pipeline,
+              modelId: constraint.modelId,
+            });
+          } catch (err) {
+            console.warn("[proxy] Plan upcharge lookup failed:", err);
+          }
+        }
+
+        // Compute end-user billable: networkFee * (1 + upchargeBps/10000) in micros
+        const endUserBillableUsdMicros =
+          upchargeResult.bps > 0
+            ? networkFeeUsdMicros + (networkFeeUsdMicros * BigInt(upchargeResult.bps)) / 10000n
+            : networkFeeUsdMicros;
+
+        const transactionId = uuidv4();
+        const usageRecordId = uuidv4();
+
         await db.transaction(async (tx) => {
           if (streamSessionId) {
             await tx
@@ -625,7 +779,7 @@ export async function proxyGenerateLivePayment(
           }
 
           await tx.insert(transactions).values({
-            id: uuidv4(),
+            id: transactionId,
             endUserId: auth.endUserId || null,
             appId: providerAppId ?? auth.appId ?? null,
             clientId: providerAppId,
@@ -635,19 +789,77 @@ export async function proxyGenerateLivePayment(
             platformCutPercent: signer.defaultCutPercent,
             platformCutWei: platformCutWei.toString(),
             status: "confirmed",
+            pipeline: constraint?.pipeline ?? null,
+            modelId: constraint?.modelId ?? null,
+            attributionSource: attribution.attributionSource,
+            gatewayRequestId: attribution.gatewayRequestId,
+            paymentMetadataVersion: attribution.paymentMetadataVersion,
+            pipelineModelConstraintHash,
+            advertisedPriceWeiPerUnit: constraint ? signedPriceStr : null,
+            advertisedPixelsPerUnit: constraint ? signedPixelsStr : null,
+            signedPriceWeiPerUnit: pricePerUnit.toString(),
+            signedPixelsPerUnit: pixelsPerUnit.toString(),
+            priceValidationStatus,
+            priceValidationReason: priceValidationReason ?? null,
+            // ETH/USD oracle snapshot
+            ethUsdPrice: ethUsd.priceUsd.toString(),
+            ethUsdSource: ethUsd.source,
+            ethUsdObservedAt: ethUsd.observedAt,
+            networkFeeUsdMicros: networkFeeUsdMicros.toString(),
+            ownerPlatformFeeWei: platformCutWei.toString(),
+            ownerPlatformFeeUsdMicros: ownerPlatformFeeUsdMicros.toString(),
+            ownerChargeWei: ownerChargeWei.toString(),
+            ownerChargeUsdMicros: ownerChargeUsdMicros.toString(),
           });
 
           if (providerAppId) {
+            const clientId = providerAppId;
             await tx.insert(usageRecords).values({
-              id: uuidv4(),
+              id: usageRecordId,
               requestId,
-              userId: auth.userId || auth.endUserId || null,
-              clientId: providerAppId,
-              modelId: typeof requestBody.modelId === "string" ? requestBody.modelId : null,
+              userId: usageUserId,
+              clientId,
+              modelId: constraint?.modelId ?? null,
               units: pixels.toString(),
               fee: feeWei.toString(),
               createdAt: new Date().toISOString(),
             });
+
+            // Billable ledger row when pipeline/model constraint is present (negotiated ticket).
+            if (constraint && pipelineModelConstraintHash) {
+              await tx.insert(usageBillingEvents).values({
+                id: uuidv4(),
+                usageRecordId,
+                transactionId,
+                streamSessionId,
+                clientId,
+                userId: usageUserId,
+                pipeline: constraint.pipeline,
+                modelId: constraint.modelId,
+                attributionSource: attribution.attributionSource,
+                gatewayRequestId: attribution.gatewayRequestId,
+                paymentMetadataVersion: attribution.paymentMetadataVersion,
+                pipelineModelConstraintHash: pipelineModelConstraintHash,
+                orchAddress: orchestratorAddress ?? null,
+                advertisedPriceWeiPerUnit: signedPriceStr,
+                advertisedPixelsPerUnit: signedPixelsStr,
+                signedPriceWeiPerUnit: pricePerUnit.toString(),
+                signedPixelsPerUnit: pixelsPerUnit.toString(),
+                networkFeeWei: feeWei.toString(),
+                networkFeeUsdMicros: networkFeeUsdMicros.toString(),
+                platformFeeWei: platformCutWei.toString(),
+                platformFeeUsdMicros: ownerPlatformFeeUsdMicros.toString(),
+                ownerChargeWei: ownerChargeWei.toString(),
+                ownerChargeUsdMicros: ownerChargeUsdMicros.toString(),
+                upchargePercentBps: upchargeResult.bps,
+                pricingRuleSource: upchargeResult.source,
+                endUserBillableUsdMicros: endUserBillableUsdMicros.toString(),
+                ethUsdPrice: ethUsd.priceUsd.toString(),
+                ethUsdSource: ethUsd.source,
+                ethUsdObservedAt: ethUsd.observedAt,
+                createdAt: new Date().toISOString(),
+              });
+            }
           }
         });
       }

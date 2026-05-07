@@ -5,6 +5,7 @@ import {
   appUsers,
   authAuditLog,
   developerApps,
+  discoveryProfiles,
   endUsers,
   oidcClients,
   oidcPayloads,
@@ -16,6 +17,7 @@ import {
   streamSessions,
   subscriptions,
   transactions,
+  usageBillingEvents,
   usageRecords,
 } from "@/db/schema";
 import { eq, inArray, or, sql } from "drizzle-orm";
@@ -64,6 +66,9 @@ export async function deleteDeveloperAppAndRelatedData(
     await tx.delete(subscriptions).where(eq(subscriptions.clientId, appInternalId));
     await tx.delete(planCapabilityBundles).where(eq(planCapabilityBundles.clientId, appInternalId));
     await tx.delete(plans).where(eq(plans.clientId, appInternalId));
+
+    await tx.delete(usageBillingEvents).where(eq(usageBillingEvents.clientId, appInternalId));
+    await tx.delete(discoveryProfiles).where(eq(discoveryProfiles.clientId, appInternalId));
 
     await tx.delete(usageRecords).where(eq(usageRecords.clientId, appInternalId));
     await tx.delete(authAuditLog).where(eq(authAuditLog.clientId, appInternalId));

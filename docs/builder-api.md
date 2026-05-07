@@ -256,8 +256,9 @@ Requests that fail auth or tenant match receive **`404 Not Found`** (not `401`/`
 | --- | --- | --- | --- |
 | `startDate` | ISO 8601 | — | Inclusive lower bound on `usage_records.created_at` |
 | `endDate` | ISO 8601 | — | Inclusive upper bound |
-| `groupBy` | `none` \| `user` | `none` | `user` adds a `byUser` array |
-| `userId` | string | — | Filter to one internal **`endUserId`** (not `externalUserId`) |
+| `groupBy` | `none` \| `user` \| `pipeline_model` | `none` | `user` adds `byUser`; `pipeline_model` adds `byPipelineModel` (requires matching billing events) |
+| `userId` | string | — | Filter to one internal **`usage_records.user_id`** (not `externalUserId`) |
+| `gatewayRequestId` | string | — | When set, filters billing events to that gateway request and may include `events` detail |
 
 Invalid dates return `400 Bad Request`. Resolve `externalUserId` → internal id via the Builder user listing or a prior `groupBy=user` response.
 
@@ -340,13 +341,111 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 
 ## Billing API
 
-Current-cycle **billing snapshot** and **plan CRUD** for a developer app. Monetary fields are **wei as decimal strings** (same parsing rules as the Usage API). Full field-by-field reference: Mintlify pages in `pymtdocs/docs/integration/` (see document header).
+Current-cycle **billing snapshot** and **plan CRUD** for a developer app. Full field-by-field reference: Mintlify pages in `pymtdocs/docs/integration/` (see document header).
+
+### Network cost and USD valuation
+
+PymtHouse stores two distinct monetary representations:
+
+- **Wei** — the canonical, exact on-chain unit. All `*Wei` fields are decimal strings.
+- **USD micros** — integer strings representing US dollars × 10⁶ (e.g. `1000000` = $1.00). USD values are computed from the ETH/USD oracle at the moment each ticket is signed and are **never recomputed retroactively**.
+
+ETH convenience fields (e.g. `networkFeeEth`, `ownerChargeEth`) are decimal strings derived from the stored wei.
+
+### ETH/USD oracle
+
+The billing oracle uses the livepeer/naap public-exchange pattern (PR #283):
+
+1. Fresh `price_oracle_snapshots` DB cache (5-minute TTL)
+2. Live Binance `ETHUSDT` ticker
+3. Live Kraken `XETHZUSD` ticker
+4. Stale DB cache
+5. `ETH_USD_PRICE` environment variable
+6. Default fallback `3000`
+
+The oracle source and observation timestamp are stored with each transaction so every USD value can be audited.
+
+**Endpoint:** `GET /api/v1/prices/eth-usd`
+
+Returns `{ ethUsd: { priceUsd, source, observedAt, isFallback } }`.
+
+### Trusted pipeline/model attribution
+
+Billable **`usage_billing_events`** rows are created when the signing request resolves to a pipeline/model constraint. Price evidence (`priceWeiPerUnit` / `pixelsPerUnit` and orchestrator address) comes from the **negotiated ticket** on the request (decoded orchestrator info), i.e. the price agreed with the orchestrator by **`python-gateway`** before signing — PymtHouse does **not** call NaaP on this hot path.
+
+1. **Constraint:** `pipeline` + `modelId` on the payment request (from the `python-gateway` metadata envelope or a direct API caller), **or** base64 **`capabilities`** (`net.Capabilities`) from which PymtHouse can derive a single pipeline/model (same shape the Go remote signer uses).
+2. **No NaaP fetch on signing:** `POST /api/signer/generate-live-payment` does not load dashboard pricing for validation. **`GET /api/v1/pipeline-pricing`** still proxies NaaP for UIs; it uses **`fetchDashboardPricing()`** without an in-process pricing cache.
+3. **Ledger insert:** When a constraint is present, PymtHouse records **`usage_billing_events`** using the signed ticket units and a **`pipeline_model_constraint_hash`** over `{ pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }`. **`price_validation_status`** is **`matched`** in that case.
+4. **Diagnostics:** **`transactions`** always records metering when the signer succeeds and `feeWei > 0`. If no pipeline/model can be resolved, **`price_validation_status`** is **`missing_constraint`** and no **`usage_billing_events`** row is written. Older rows may still show legacy statuses such as **`pricing_unavailable`**. Signing is **not** blocked by attribution gaps — the gateway still receives the signer response.
+
+**Usage API:** `groupBy=pipeline_model` aggregates from **`usage_billing_events`**, so breakdown rows appear for new traffic that includes `pipeline` + `modelId` (or derivable capabilities) on each payment.
+
+#### Gateway payment metadata contract
+
+`python-gateway` embeds these fields in each `/generate-live-payment` payload when attribution metadata is provided:
+
+```json
+{
+  "paymentMetadataVersion": "2026-04-usage-attribution-v1",
+  "attributionSource": "pymthouse_gateway",
+  "gatewayRequestId": "job-or-session-id",
+  "pipeline": "text-to-image",
+  "modelId": "stabilityai/sdxl"
+}
+```
+
+PymtHouse uses these fields for attribution and billing-event grouping together with the negotiated ticket price from the request. The go-livepeer remote signer is not required to sign pipeline/model metadata for v1.
+
+### NaaP catalog and pricing routes
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/v1/pipeline-catalog` | NaaP pipeline catalog (cached 5 min). Used by Plans UI dropdowns. |
+| `GET /api/v1/pipeline-pricing?pipeline=...&model=...` | NaaP per-orchestrator pricing rows (proxied each request; no in-process cache). Used for UI estimates. |
+
+### Usage API — pipeline/model grouping
+
+`GET /api/v1/apps/{clientId}/usage` supports:
+
+| Parameter | Description |
+| --- | --- |
+| `groupBy=pipeline_model` | Aggregate by validated pipeline/model. |
+| `groupBy=user` | Aggregate by app user (existing behaviour). |
+| `gatewayRequestId=...` | Filter and return per-record billing event detail for a specific gateway job. |
+
+Response totals now include:
+
+| Field | Description |
+| --- | --- |
+| `totalFeeWei` | Total network fee (existing). |
+| `totalFeeEth` | Decimal ETH. |
+| `networkFeeUsdMicros` | Transaction-time USD micros. |
+| `ownerChargeWei` | Network fee + platform cut. |
+| `ownerChargeUsdMicros` | Transaction-time USD micros. |
+| `platformFeeWei` | PymtHouse platform cut. |
+| `endUserBillableUsdMicros` | Retail after upcharge. |
 
 ### Billing summary
 
 **Endpoint:** `GET /api/v1/apps/{clientId}/billing`
 
-Returns the active plan (if any), the owner’s subscription period (or calendar-month fallback), aggregated usage for that period (`requestCount`, `totalFeeWei`, `totalUnits`), a **per-day timeline** (every UTC calendar day in the period, including zero-usage days), computed **overage** (`overageUnits`, `overageWei`) for `subscription` / `usage` plans with `includedUnits` and `overageRateWei`, and `platformCutPercent` from signer config.
+Returns the active plan, subscription period, aggregated usage, per-day timeline, overage, **owner cost breakdown** (network fee + platform fee + total), **retail breakdown** (included allowance consumed vs remaining), and **pipeline/model breakdown** from validated `usage_billing_events`.
+
+#### Plan fields (new)
+
+| Field | Description |
+| --- | --- |
+| `includedUsdMicros` | Subscription usage allowance in USD micros (e.g. `10000000` = $10.00). |
+| `generalUpchargePercentBps` | Default positive upcharge for all retail usage, basis points. |
+| `payPerUseUpchargePercentBps` | Fallback upcharge for free/no-credit users; inherits `generalUpchargePercentBps` if unset. |
+| `billingCycle` | `"monthly"` (default). |
+| `discoveryProfileId` | Optional FK to an app-scoped discovery profile (see **Discovery profiles** below). Omitted from billing summary payloads today; present on **`GET .../plans`**. |
+
+#### Capability bundle fields (new)
+
+| Field | Description |
+| --- | --- |
+| `upchargePercentBps` | Pipeline/model-specific upcharge override, basis points. Takes precedence over `generalUpchargePercentBps` for matching usage. |
 
 ### Authentication (billing summary)
 
@@ -364,20 +463,55 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
   "${BASE_URL}/api/v1/apps/${CLIENT_ID}/billing"
 ```
 
-### Plans (provider session)
+### Example (usage groupBy=pipeline_model)
+
+```bash
+curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+  "${BASE_URL}/api/v1/apps/${CLIENT_ID}/usage?groupBy=pipeline_model"
+```
+
+### Discovery profiles (provider session + M2M read)
+
+Reusable **discovery** configuration (orchestrator ranking defaults) lives in **`discovery_profiles`** and **`discovery_profile_bundles`**. **Billing plans** reference an optional `discoveryProfileId`. Editing discovery no longer requires touching subscription pricing fields.
+
+**Base path:** `/api/v1/apps/{clientId}/discovery-profiles`
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/discovery-profiles` | **M2M Basic** or provider session | List profiles with resolved `policy` and `capabilities[]` (`pipeline`, `modelId`, `discoveryPolicy`) |
+| `POST` | `/discovery-profiles` | Provider session only | Create profile: `name` (required), optional `policy`, optional `capabilities[]` with `{ pipeline, modelId, discoveryPolicy }` only |
+| `GET` | `/discovery-profiles/{profileId}` | **M2M Basic** or provider session | One profile |
+| `PUT` | `/discovery-profiles/{profileId}` | Provider session only | Update `name`, `policy`, and/or replace `capabilities[]` |
+| `DELETE` | `/discovery-profiles/{profileId}` | Provider session only | Delete profile; **`409`** if any plan still references it |
+
+**Implementation:** [`src/app/api/v1/apps/[id]/discovery-profiles/route.ts`](../src/app/api/v1/apps/[id]/discovery-profiles/route.ts), [`src/app/api/v1/apps/[id]/discovery-profiles/[profileId]/route.ts`](../src/app/api/v1/apps/[id]/discovery-profiles/[profileId]/route.ts).
+
+### Plans (provider session + M2M read)
 
 **Base path:** `/api/v1/apps/{clientId}/plans`
 
-All plan routes use **`getAuthorizedProviderApp`** — a **logged-in provider dashboard** session for the app owner, platform admin, or `providerAdmins` team member. **M2M Basic auth is not supported** on these handlers (unlike the billing summary and Usage API). Mutations additionally require **`canEditProviderApp`**.
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/apps/{clientId}/plans` | **M2M Basic** (same pattern as billing: path `{clientId}` = public `app_…` id, credentials must resolve to that app) **or** provider dashboard session | List plans and capability bundles. Each plan includes optional **`discoveryProfileId`** and **resolved** **`discoveryPolicy`** (from the linked profile) plus per-bundle **resolved** **`discoveryPolicy`** (from `discovery_profile_bundles` keys matching each billing bundle’s `pipeline` / `modelId`). |
+| `POST` | `/api/v1/apps/{clientId}/plans` | Provider session only | Create plan (`name` required). Optional **`discoveryProfileId`** (must belong to the same app). Each **`capabilities[]`** entry is billing-only: `pipeline`, `modelId` (`"*"` allowed), SLA/upcharge fields — **not** `discoveryPolicy`. |
+| `PUT` | `/api/v1/apps/{clientId}/plans` | Provider session only | Update plan (body must include `id`; optional **`capabilities`** replaces entire bundle set). Optional **`discoveryProfileId`** (`null` clears the link). |
+| `DELETE` | `/api/v1/apps/{clientId}/plans?planId=...` | Provider session only | Delete plan and its bundles |
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/api/v1/apps/{clientId}/plans` | List plans and capability bundles |
-| `POST` | `/api/v1/apps/{clientId}/plans` | Create plan (`name` required; `subscription` type requires `includedUnits` + `overageRateWei`) |
-| `PUT` | `/api/v1/apps/{clientId}/plans` | Update plan (body must include `id`; optional `capabilities` replaces entire bundle set) |
-| `DELETE` | `/api/v1/apps/{clientId}/plans?planId=...` | Delete plan and its bundles |
+**Discovery view (integrators, e.g. NaaP):**
 
-**Implementation:** [`src/app/api/v1/apps/[id]/billing/route.ts`](../src/app/api/v1/apps/[id]/billing/route.ts), [`src/app/api/v1/apps/[id]/plans/route.ts`](../src/app/api/v1/apps/[id]/plans/route.ts).
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/apps/{clientId}/plans/discovery` | **M2M Basic** or provider session | **Active** plans only: `id`, `name`, `status`, **resolved** `discoveryPolicy`, and `capabilities[]` with `pipeline`, `modelId`, **resolved** `discoveryPolicy`. Same JSON shape as before migration. |
+
+**`discoveryPolicy`** (optional JSON object, aligned with NaaP orchestrator leaderboard plan inputs):
+
+- `topN` — integer 1…1000  
+- `sortBy` — `"slaScore"` \| `"latency"` \| `"price"` \| `"swapRate"` \| `"avail"`  
+- `slaMinScore` — number 0…1  
+- `slaWeights` — `{ latency?, swapRate?, price? }` each 0…1  
+- `filters` — `{ gpuRamGbMin?, gpuRamGbMax?, priceMax?, maxAvgLatencyMs?, maxSwapRatio? }` (`maxSwapRatio` 0…1; `gpuRamGbMin` ≤ `gpuRamGbMax` when both set)
+
+**Implementation:** [`src/app/api/v1/apps/[id]/billing/route.ts`](../src/app/api/v1/apps/[id]/billing/route.ts), [`src/app/api/v1/apps/[id]/plans/route.ts`](../src/app/api/v1/apps/[id]/plans/route.ts), [`src/app/api/v1/apps/[id]/plans/discovery/route.ts`](../src/app/api/v1/apps/[id]/plans/discovery/route.ts), [`src/lib/discovery-plans.ts`](../src/lib/discovery-plans.ts), [`src/lib/discovery-profile-resolve.ts`](../src/lib/discovery-profile-resolve.ts).
 
 ---
 
@@ -430,8 +564,11 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 - Map one external user identifier to one Builder API user record.
 - Migrate away from legacy `/api/v1/naap/*` routes to OIDC + Builder APIs.
 - For usage attribution, populate `usage_records.user_id` when a request maps to a provisioned user; store fees as decimal wei strings.
-- For billing dashboards, call `GET /api/v1/apps/{clientId}/billing` for cycle totals, timeline, and overage; manage plans via `/plans` from a trusted operator session.
+- For pipeline/model billing, negotiated-ticket evidence is captured through the `/generate-live-payment` flow (or via the `python-gateway` metadata envelope). PymtHouse records `usage_billing_events` after off-path or asynchronous reconciliation of that evidence, while billing totals and plan management remain available via `GET /api/v1/apps/{clientId}/billing` and `/plans` respectively.
+- For billing dashboards, call `GET /api/v1/apps/{clientId}/billing` for cycle totals, timeline, overage, and USD breakdown; manage plans via `/plans` from a trusted operator session.
+- Use `groupBy=pipeline_model` on the Usage API to get per-pipeline/model ETH and USD breakdown.
 - Ensure `(client_id, request_id)` uniqueness for usage rows where applicable.
+- Do not attempt to recompute historical USD values using the current oracle rate; use the stored `*UsdMicros` fields.
 
 ---
 
@@ -455,7 +592,23 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 - [`src/app/api/v1/apps/[id]/billing/route.ts`](../src/app/api/v1/apps/[id]/billing/route.ts)
 - [`src/app/api/v1/apps/[id]/plans/route.ts`](../src/app/api/v1/apps/[id]/plans/route.ts)
 - [`src/lib/provider-apps.ts`](../src/lib/provider-apps.ts) (`getAuthorizedProviderApp`, `getProviderApp`)
-- [`src/db/schema.ts`](../src/db/schema.ts) (`usageRecords`, `appUsers`)
+- [`src/db/schema.ts`](../src/db/schema.ts) (`usageRecords`, `usageBillingEvents`, `priceOracleSnapshots`, `appUsers`)
+
+**Billing oracle and catalog**
+
+- [`src/lib/billing-runtime.ts`](../src/lib/billing-runtime.ts) (pipeline/model validation, upcharge resolution, USD micros)
+- [`src/lib/prices/public-exchange-spot.ts`](../src/lib/prices/public-exchange-spot.ts) (Binance/Kraken spot fetch)
+- [`src/lib/prices/eth-usd-oracle.ts`](../src/lib/prices/eth-usd-oracle.ts) (ETH/USD oracle with DB cache)
+- [`src/lib/naap-catalog.ts`](../src/lib/naap-catalog.ts) (NaaP catalog with TTL cache; pricing fetch is uncached)
+- [`src/app/api/v1/prices/eth-usd/route.ts`](../src/app/api/v1/prices/eth-usd/route.ts)
+- [`src/app/api/v1/pipeline-catalog/route.ts`](../src/app/api/v1/pipeline-catalog/route.ts)
+- [`src/app/api/v1/pipeline-pricing/route.ts`](../src/app/api/v1/pipeline-pricing/route.ts)
+
+**Gateway payment metadata (cross-repo)**
+
+- [`../python-gateway/src/livepeer_gateway/payment_metadata.py`](../../python-gateway/src/livepeer_gateway/payment_metadata.py) (canonical metadata envelope)
+- [`../python-gateway/src/livepeer_gateway/payments_base.py`](../../python-gateway/src/livepeer_gateway/payments_base.py) (metadata embedded in payment payloads)
+- [`../pymthouse-gateway/src/pymthouse_gateway/livepeer/lv2v.py`](../../pymthouse-gateway/src/pymthouse_gateway/livepeer/lv2v.py) (gateway attribution passed to python-gateway)
 
 ---
 
@@ -468,7 +621,10 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 5. **OIDC** uses one registration model for all clients to avoid special-case trust paths.
 6. **RFC 8693** preserves auditable token transitions for device binding and remote signer sessions.
 7. **Usage totals** use wei strings to avoid JSON precision loss; **404** on usage and billing summary routes limits information leakage.
-8. **Billing summary** collapses plan, subscription window, usage, daily timeline, and overage into one response; raw per-request data remains on the Usage API.
+8. **Billing summary** collapses plan, subscription window, usage, daily timeline, overage, USD cost, and pipeline/model breakdown into one response; raw per-request data remains on the Usage API.
+9. **USD micros** are computed once at signing time using the oracle ETH/USD snapshot and stored immutably; historical USD accuracy depends on oracle quality at signing time, not later queries.
+10. **Fail-closed billing**: requests without a validated pipeline/model constraint do not generate billable usage events, preventing unattributed usage from accumulating silently.
+11. **Attribution source** (`pymthouse_gateway`, `python_gateway`, `direct_api`) is stored with each billing event so reporting can distinguish gateway-originated usage from direct API integrations.
 
 ---
 

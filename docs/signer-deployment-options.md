@@ -79,6 +79,7 @@ Expose only Apache on the internet: **mod_authnz_jwt** validates PymtHouse OIDC 
    | `OIDC_AUDIENCE` | Defaults to the same as issuer; must match token `aud`. |
    | `JWKS_URI` | Defaults to `https://pymthouse.com/api/v1/oidc/jwks`. Used at startup and on refresh. |
    | `JWKS_REFRESH_SECONDS` | Background JWKS refresh interval (default `900`). Triggers `apachectl graceful` when the PEM changes. |
+   | `JWKS_TLS_INSECURE` | Set to `1` for local/dev when `JWKS_URI` is HTTPS but the server uses a self-signed or corporate-intercepted certificate (`jwks_to_pem.py`). **Never** in production. `host.docker.internal` / `localhost` HTTPS skips verification without this flag. |
    | `SIGNER_UPSTREAM` | Optional. If set (e.g. `http://signer:8081` in compose-only gateway builds), the container does **not** run livepeer and only proxies to this URL. |
    | `SIGNER_CLI_HTTP_ADDR` | Upstream for the CLI port (default `http://127.0.0.1:4935`). In compose, set to `http://signer:4935`. Apache exposes the CLI under **`/__signer_cli/`** on the same public port as the HTTP API. |
 
@@ -121,7 +122,8 @@ app = "pymthouse-signer"
 
 [build]
   [build.args]
-    LIVEPEER_VERSION = "0.8.10"
+    LIVEPEER_COMMIT = "0a1919e0c58986375df158433445563a45a04df8"
+    LIVEPEER_SHA256 = "0ba7b032a95bf1969b6983dfe065bc802105d982242e141840df422be1a6bade"
 
 [env]
   SIGNER_NETWORK = "arbitrum-one-mainnet"
@@ -149,10 +151,14 @@ Create a `Dockerfile.fly`:
 ```dockerfile
 FROM debian:bookworm-slim
 
+ARG LIVEPEER_COMMIT
+ARG LIVEPEER_SHA256
+
 RUN apt-get update && \
     apt-get install -y wget ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    wget -q https://github.com/livepeer/go-livepeer/releases/download/v0.8.10/livepeer-linux-amd64.tar.gz && \
+    wget -q "https://build.livepeer.live/go-livepeer/${LIVEPEER_COMMIT}/livepeer-linux-amd64.tar.gz" -O livepeer-linux-amd64.tar.gz && \
+    echo "${LIVEPEER_SHA256}  livepeer-linux-amd64.tar.gz" | sha256sum -c - && \
     tar -xzf livepeer-linux-amd64.tar.gz && \
     mv livepeer-linux-amd64/livepeer /usr/local/bin/livepeer && \
     chmod +x /usr/local/bin/livepeer && \
@@ -349,15 +355,12 @@ Look for:
 
 To update to a new version:
 
-1. **Update the download URL** in:
-   - `docker/signer-dmz/Dockerfile.signer` (line with wget)
-   - `docker/signer-dmz/Dockerfile` (livepeer download in the `signer-dmz` image stage, if you use it)
+1. **Pick a build** from [go-livepeer Actions](https://github.com/livepeer/go-livepeer/actions) (or a tagged release). CI uploads linux-amd64 artifacts to **Google Cloud** at `https://build.livepeer.live/go-livepeer/<full-git-sha>/livepeer-linux-amd64.tar.gz` (same archive as the workflow artifact zip).
+
+2. **Update** `LIVEPEER_COMMIT`, `LIVEPEER_SHA256`, and the download URL in:
+   - `docker/signer-dmz/Dockerfile.signer`
+   - `docker/signer-dmz/Dockerfile` (livepeer download in the `signer-dmz` image stage)
    - `nixpacks.toml` (install phase)
-   
-2. **Change version number:**
-   ```
-   v0.8.10 → v0.8.11
-   ```
 
 3. **Redeploy** on your platform
 

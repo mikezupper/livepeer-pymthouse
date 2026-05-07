@@ -23,6 +23,8 @@ export function mockSignerFetch(opts?: {
   signByocJobResponse?: unknown;
   discoverOrchestratorsResponse?: unknown;
   generateLivePaymentResponse?: unknown;
+  dashboardPricingResponse?: unknown;
+  pipelineCatalogResponse?: unknown;
 }): MockSignerController {
   const signerHost = opts?.signerHost ?? "http://test-signer.invalid";
   const signerOrigin = new URL(signerHost).origin;
@@ -74,6 +76,20 @@ export function mockSignerFetch(opts?: {
         `mockSignerFetch: invalid URL in test: ${method} ${url}`,
       );
     }
+    if (opts?.dashboardPricingResponse !== undefined && parsedUrl.pathname.endsWith("/dashboard/pricing")) {
+      return new Response(JSON.stringify(opts.dashboardPricingResponse), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (opts?.pipelineCatalogResponse !== undefined && parsedUrl.pathname.endsWith("/dashboard/pipeline-catalog")) {
+      return new Response(JSON.stringify(opts.pipelineCatalogResponse), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     if (parsedUrl.origin !== signerOrigin) {
       throw new Error(
         `mockSignerFetch: unexpected non-signer fetch in test: ${method} ${url}`,

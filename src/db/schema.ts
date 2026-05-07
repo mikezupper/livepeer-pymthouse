@@ -9,8 +9,10 @@ import {
   primaryKey,
   uniqueIndex,
   index,
+  jsonb,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { DiscoveryPolicy } from "@/lib/discovery-plans";
 
 // Admin/operator/developer accounts (OAuth or wallet login)
 export const users = pgTable("users", {
@@ -131,6 +133,39 @@ export const transactions = pgTable(
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
+    // --- Trusted pipeline/model attribution (added by billing oracle migration) ---
+    /** Validated pipeline id for the signed job. */
+    pipeline: text("pipeline"),
+    /** Validated model id for the signed job. */
+    modelId: text("model_id"),
+    /** pymthouse_gateway | python_gateway | direct_api */
+    attributionSource: text("attribution_source"),
+    /** Opaque job/request id from the gateway. */
+    gatewayRequestId: text("gateway_request_id"),
+    /** metadata version string from python-gateway envelope. */
+    paymentMetadataVersion: text("payment_metadata_version"),
+    /** SHA-256 of { pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }. */
+    pipelineModelConstraintHash: text("pipeline_model_constraint_hash"),
+    /** Negotiated (ticket) wei per unit for the constraint hash; same as signed when matched. */
+    advertisedPriceWeiPerUnit: text("advertised_price_wei_per_unit"),
+    advertisedPixelsPerUnit: text("advertised_pixels_per_unit"),
+    /** Decoded from the ticket signing request. */
+    signedPriceWeiPerUnit: text("signed_price_wei_per_unit"),
+    signedPixelsPerUnit: text("signed_pixels_per_unit"),
+    /** matched (constraint present) | missing_constraint | legacy rows may have pricing_unavailable | unknown_pipeline_model | price_mismatch */
+    priceValidationStatus: text("price_validation_status"),
+    priceValidationReason: text("price_validation_reason"),
+    // --- ETH/USD oracle snapshot at signing time ---
+    ethUsdPrice: text("eth_usd_price"),
+    ethUsdSource: text("eth_usd_source"),
+    ethUsdObservedAt: text("eth_usd_observed_at"),
+    /** networkFeeUsdMicros = amountWei / 1e18 * ethUsdPrice * 1e6, stored as integer string. */
+    networkFeeUsdMicros: text("network_fee_usd_micros"),
+    ownerPlatformFeeWei: text("owner_platform_fee_wei"),
+    ownerPlatformFeeUsdMicros: text("owner_platform_fee_usd_micros"),
+    /** ownerChargeWei = amountWei + platformCutWei */
+    ownerChargeWei: text("owner_charge_wei"),
+    ownerChargeUsdMicros: text("owner_charge_usd_micros"),
   },
   (t) => [
     index("transactions_usage_confirmed_stream_session_created_at_idx")
@@ -284,6 +319,52 @@ export const providerAdmins = pgTable(
   (t) => [uniqueIndex("idx_provider_admins_user_client").on(t.userId, t.clientId)],
 );
 
+/** Reusable app-scoped discovery defaults for orchestrator leaderboard (no pricing). */
+export const discoveryProfiles = pgTable(
+  "discovery_profiles",
+  {
+    id: text("id").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => developerApps.id),
+    name: text("name").notNull(),
+    policy: jsonb("policy").$type<DiscoveryPolicy | null>(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text("updated_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => [uniqueIndex("idx_discovery_profiles_client_name").on(t.clientId, t.name)],
+);
+
+export const discoveryProfileBundles = pgTable(
+  "discovery_profile_bundles",
+  {
+    id: text("id").primaryKey(),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => discoveryProfiles.id, { onDelete: "cascade" }),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => developerApps.id),
+    pipeline: text("pipeline").notNull(),
+    modelId: text("model_id").notNull(),
+    discoveryPolicy: jsonb("discovery_policy").$type<DiscoveryPolicy | null>(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => [
+    uniqueIndex("idx_discovery_profile_bundles_unique").on(
+      t.profileId,
+      t.pipeline,
+      t.modelId,
+    ),
+  ],
+);
+
 export const plans = pgTable(
   "plans",
   {
@@ -300,6 +381,17 @@ export const plans = pgTable(
     includedUnits: bigint("included_units", { mode: "bigint" }),
     /** Per-pixel wei for overage (subscription) or base rate (usage plans). */
     overageRateWei: bigint("overage_rate_wei", { mode: "bigint" }),
+    /** USD usage allowance included per billing cycle, in micros (1 USD = 1 000 000). */
+    includedUsdMicros: text("included_usd_micros"),
+    /** Default positive upcharge for all retail usage, in basis points. */
+    generalUpchargePercentBps: integer("general_upcharge_percent_bps"),
+    /** Optional fallback upcharge for free/no-credit users; inherits generalUpchargePercentBps if unset. */
+    payPerUseUpchargePercentBps: integer("pay_per_use_upcharge_percent_bps"),
+    /** Billing period length; currently only "monthly" is supported. */
+    billingCycle: text("billing_cycle").notNull().default("monthly"),
+    discoveryProfileId: text("discovery_profile_id").references(() => discoveryProfiles.id, {
+      onDelete: "set null",
+    }),
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -325,6 +417,8 @@ export const planCapabilityBundles = pgTable(
     slaTargetScore: real("sla_target_score"),
     slaTargetP95Ms: integer("sla_target_p95_ms"),
     maxPricePerUnit: text("max_price_per_unit"),
+    /** Pipeline/model-specific positive upcharge override, in basis points. Overrides plan generalUpchargePercentBps. */
+    upchargePercentBps: integer("upcharge_percent_bps"),
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -442,6 +536,108 @@ export const appAllowedDomains = pgTable("app_allowed_domains", {
   uniqueIndex("app_allowed_domains_app_id_domain_unique").on(table.appId, table.domain),
 ]);
 
+// ============================================
+// Billing Oracle Tables
+// ============================================
+
+/** ETH/USD spot price snapshots from public exchanges. */
+export const priceOracleSnapshots = pgTable(
+  "price_oracle_snapshots",
+  {
+    id: text("id").primaryKey(),
+    /** Asset symbol, e.g. "ETH". */
+    symbol: text("symbol").notNull(),
+    /** Decimal USD price as a string to avoid float imprecision. */
+    priceUsd: text("price_usd").notNull(),
+    /** binance | kraken | public_exchange | env | default */
+    source: text("source").notNull(),
+    /** ISO timestamp of the exchange observation. */
+    fetchedAt: text("fetched_at").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => [
+    index("idx_price_oracle_snapshots_symbol_fetched_at").on(t.symbol, t.fetchedAt),
+  ],
+);
+
+/**
+ * Retail billing events keyed to a signed ticket with pipeline/model constraint.
+ * Created when the signing request resolves to an explicit pipeline/model and
+ * price evidence is taken from the negotiated ticket (orchestrator info).
+ */
+export const usageBillingEvents = pgTable(
+  "usage_billing_events",
+  {
+    id: text("id").primaryKey(),
+    /** FK-like reference to usage_records.id; unique to enforce one billing event per dedupe key. */
+    usageRecordId: text("usage_record_id"),
+    /** FK-like reference to transactions.id. */
+    transactionId: text("transaction_id"),
+    streamSessionId: text("stream_session_id"),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => developerApps.id),
+    userId: text("user_id"),
+    planId: text("plan_id"),
+    subscriptionId: text("subscription_id"),
+    // --- Pipeline/model constraint from request (body or capabilities) ---
+    pipeline: text("pipeline").notNull(),
+    modelId: text("model_id").notNull(),
+    /** pymthouse_gateway | python_gateway | direct_api */
+    attributionSource: text("attribution_source").notNull(),
+    gatewayRequestId: text("gateway_request_id"),
+    paymentMetadataVersion: text("payment_metadata_version"),
+    /** SHA-256 of { pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }. */
+    pipelineModelConstraintHash: text("pipeline_model_constraint_hash").notNull(),
+    orchAddress: text("orch_address"),
+    // --- Negotiated ticket price (same as signed when recorded from generate-live-payment) ---
+    advertisedPriceWeiPerUnit: text("advertised_price_wei_per_unit").notNull(),
+    advertisedPixelsPerUnit: text("advertised_pixels_per_unit").notNull(),
+    signedPriceWeiPerUnit: text("signed_price_wei_per_unit").notNull(),
+    signedPixelsPerUnit: text("signed_pixels_per_unit").notNull(),
+    // --- Network fee in wei and transaction-time USD ---
+    networkFeeWei: text("network_fee_wei").notNull(),
+    networkFeeUsdMicros: text("network_fee_usd_micros").notNull(),
+    // --- Platform fee ---
+    platformFeeWei: text("platform_fee_wei").notNull(),
+    platformFeeUsdMicros: text("platform_fee_usd_micros").notNull(),
+    // --- Owner charge (network fee + platform fee) ---
+    ownerChargeWei: text("owner_charge_wei").notNull(),
+    ownerChargeUsdMicros: text("owner_charge_usd_micros").notNull(),
+    /** Upcharge applied, in basis points. */
+    upchargePercentBps: integer("upcharge_percent_bps").notNull().default(0),
+    /** pipeline_model | general | pay_per_use | subscription_included | unpriced */
+    pricingRuleSource: text("pricing_rule_source").notNull().default("unpriced"),
+    endUserBillableUsdMicros: text("end_user_billable_usd_micros").notNull().default("0"),
+    // --- ETH/USD oracle snapshot used at signing time ---
+    ethUsdPrice: text("eth_usd_price").notNull(),
+    ethUsdSource: text("eth_usd_source").notNull(),
+    ethUsdObservedAt: text("eth_usd_observed_at").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => [
+    uniqueIndex("idx_usage_billing_events_usage_record_id")
+      .on(t.usageRecordId)
+      .where(sql`${t.usageRecordId} IS NOT NULL`),
+    index("idx_usage_billing_events_client_created_at").on(t.clientId, t.createdAt),
+    index("idx_usage_billing_events_client_user_created_at").on(t.clientId, t.userId, t.createdAt),
+    index("idx_usage_billing_events_client_pipeline_model_created_at").on(
+      t.clientId,
+      t.pipeline,
+      t.modelId,
+      t.createdAt,
+    ),
+    index("idx_usage_billing_events_stream_session_created_at").on(
+      t.streamSessionId,
+      t.createdAt,
+    ),
+  ],
+);
+
 /** node-oidc-provider adapter storage (JSON payloads). */
 export const oidcPayloads = pgTable(
   "oidc_payloads",
@@ -491,3 +687,7 @@ export type Subscription = typeof subscriptions.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type UsageRecord = typeof usageRecords.$inferSelect;
 export type AuthAuditLog = typeof authAuditLog.$inferSelect;
+export type PriceOracleSnapshot = typeof priceOracleSnapshots.$inferSelect;
+export type NewPriceOracleSnapshot = typeof priceOracleSnapshots.$inferInsert;
+export type UsageBillingEvent = typeof usageBillingEvents.$inferSelect;
+export type NewUsageBillingEvent = typeof usageBillingEvents.$inferInsert;

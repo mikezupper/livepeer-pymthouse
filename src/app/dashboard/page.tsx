@@ -47,7 +47,12 @@ async function AdminDashboard() {
     await Promise.all([
       countActiveStreamsByRecentPayment(),
       getActiveStreamSessionsByRecentPayment(5),
-      db.select().from(transactions),
+      db
+        .select({
+          amountWei: transactions.amountWei,
+          platformCutWei: transactions.platformCutWei,
+        })
+        .from(transactions),
       db.select().from(endUsers),
     ]);
 

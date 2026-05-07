@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 /**
- * Billing & usage moved to a single sidebar destination.
+ * Usage dashboard is platform-wide at /billing or per-app at /apps/[id]/usage.
  * Keep old deep links working.
  */
 export default function AppBillingRedirectPage() {

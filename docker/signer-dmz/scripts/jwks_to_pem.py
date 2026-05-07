@@ -6,6 +6,7 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import ssl
 import sys
 import urllib.error
@@ -37,6 +38,49 @@ def _decode_jwk_param(jwk: dict, name: str) -> int:
         return int.from_bytes(_b64url_decode(raw), "big")
     except (binascii.Error, ValueError) as err:
         raise ValueError(f"invalid base64url in JWK field {name!r}: {err}") from err
+
+
+def _jwks_dev_tls_hosts() -> frozenset[str]:
+    """Hostnames where we skip TLS verification when JWKS is served over HTTPS with a dev cert."""
+    return frozenset(
+        {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "host.docker.internal",
+        }
+    )
+
+
+def _jwks_tls_verify_disabled(parsed: urllib.parse.ParseResult) -> bool:
+    """True to disable certificate verification (local HTTPS / corporate MITM / self-signed)."""
+    if parsed.scheme != "https":
+        return False
+    flag = os.environ.get("JWKS_TLS_INSECURE", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    host = (parsed.hostname or "").lower()
+    return host in _jwks_dev_tls_hosts()
+
+
+def _https_client_context(parsed: urllib.parse.ParseResult) -> ssl.SSLContext:
+    if _jwks_tls_verify_disabled(parsed):
+        reason = (
+            "JWKS_TLS_INSECURE"
+            if os.environ.get("JWKS_TLS_INSECURE", "").strip().lower()
+            in ("1", "true", "yes", "on")
+            else f"dev hostname {parsed.hostname!r}"
+        )
+        print(
+            f"jwks_to_pem: WARNING: TLS certificate verification disabled ({reason}); "
+            "use only in local development",
+            file=sys.stderr,
+        )
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return ssl.create_default_context()
 
 
 def _jwks_url_allowed(parsed: urllib.parse.ParseResult) -> bool:
@@ -121,7 +165,7 @@ def main() -> int:
     redirect_handler = _RejectDisallowedJwksRedirects()
     try:
         if parsed.scheme == "https":
-            ctx = ssl.create_default_context()
+            ctx = _https_client_context(parsed)
             opener = urllib.request.build_opener(
                 redirect_handler,
                 urllib.request.HTTPHandler(),

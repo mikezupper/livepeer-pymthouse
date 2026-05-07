@@ -1,8 +1,12 @@
-import { redirect } from "next/navigation";
+export const dynamic = "force-dynamic";
 
-/**
- * Usage analytics live on Billing. Old URL redirects for bookmarks and links.
- */
-export default function UsageRedirectPage() {
-  redirect("/billing");
+import BillingUsageDashboard from "@/components/BillingUsageDashboard";
+
+export default async function AppUsagePage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  return <BillingUsageDashboard filterAppId={id} />;
 }

@@ -124,9 +124,9 @@ export async function createAppUser(opts: {
 }
 
 /**
- * Sentinel URL the mock signer fetcher expects. Stored briefly on the shared
- * `signer_config` row for the duration of a test run and reverted on teardown
- * so we never leak it into a real deployment's routing.
+ * Sentinel URL the mock signer fetcher expects. Tests expose this through a
+ * process-local env override so it never leaks into the shared `signer_config`
+ * row that local dev and deployed instances read.
  */
 export const TEST_SIGNER_URL = "http://test-signer.invalid";
 
@@ -148,7 +148,8 @@ function assertNonProdDatabase(): void {
 
 /**
  * Ensure the default signer row exists and is marked running so proxy routes
- * forward requests to the mocked fetcher.
+ * are allowed to forward requests. The mocked signer URL is process-local via
+ * `PYMTHOUSE_TEST_SIGNER_URL`; do not persist it in the shared DB row.
  *
  * Teardown is intentionally a no-op: `node --test` runs files in parallel
  * **processes** sharing one Postgres row. A refcount/snapshot restore in one
@@ -156,10 +157,14 @@ function assertNonProdDatabase(): void {
  * still mid-run (503: Signer is not running). See usage-integration vs
  * proxy-routes tests.
  *
- * If a run crashes, use {@link clearTestSignerSentinel} or re-seed the row.
+ * If an older run crashed before this fixture stopped writing signer URLs, use
+ * {@link clearTestSignerSentinel} or re-seed the row.
  */
 export async function ensureRunningSigner(): Promise<() => Promise<void>> {
   assertNonProdDatabase();
+
+  const priorTestSignerUrl = process.env.PYMTHOUSE_TEST_SIGNER_URL;
+  process.env.PYMTHOUSE_TEST_SIGNER_URL = TEST_SIGNER_URL;
 
   const rows = await db
     .select()
@@ -171,23 +176,31 @@ export async function ensureRunningSigner(): Promise<() => Promise<void>> {
   if (prior) {
     await db
       .update(signerConfig)
-      .set({ status: "running", signerUrl: TEST_SIGNER_URL })
+      .set({
+        status: "running",
+        signerUrl: prior.signerUrl === TEST_SIGNER_URL ? null : prior.signerUrl,
+      })
       .where(eq(signerConfig.id, "default"));
   } else {
     await db.insert(signerConfig).values({
       id: "default",
       name: "pymthouse test signer",
-      signerUrl: TEST_SIGNER_URL,
       status: "running",
       network: "arbitrum-one-mainnet",
       ethRpcUrl: "https://arb1.arbitrum.io/rpc",
-        signerPort: 8080,
+      signerPort: 8080,
       defaultCutPercent: 15,
       billingMode: "delegated",
     });
   }
 
-  return async () => {};
+  return async () => {
+    if (priorTestSignerUrl === undefined) {
+      delete process.env.PYMTHOUSE_TEST_SIGNER_URL;
+    } else {
+      process.env.PYMTHOUSE_TEST_SIGNER_URL = priorTestSignerUrl;
+    }
+  };
 }
 
 /**
@@ -263,15 +276,18 @@ export async function cleanupTestApp(
     );
   }
 
-  await db.execute(sql`DELETE FROM oidc_auth_codes WHERE client_id = ${oidcClientPublic}`);
-  await db.execute(sql`DELETE FROM oidc_refresh_tokens WHERE client_id = ${oidcClientPublic}`);
-  await db.execute(sql`DELETE FROM oidc_device_codes WHERE client_id = ${oidcClientPublic}`);
+  await deleteFromOptionalTable("oidc_auth_codes", "client_id", oidcClientPublic);
+  await deleteFromOptionalTable("oidc_refresh_tokens", "client_id", oidcClientPublic);
+  await deleteFromOptionalTable("oidc_device_codes", "client_id", oidcClientPublic);
 
   await db.execute(sql`DELETE FROM api_keys WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM subscriptions WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM plan_capability_bundles WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM plans WHERE client_id = ${appId}`);
+  await db.execute(sql`DELETE FROM discovery_profile_bundles WHERE client_id = ${appId}`);
+  await db.execute(sql`DELETE FROM discovery_profiles WHERE client_id = ${appId}`);
 
+  await db.execute(sql`DELETE FROM usage_billing_events WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM usage_records WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM auth_audit_log WHERE client_id = ${appId}`);
   await db.execute(sql`DELETE FROM app_allowed_domains WHERE app_id = ${appId}`);
@@ -311,6 +327,31 @@ export async function cleanupTestApp(
 function arrayLiteral(ids: string[]): string {
   const escaped = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(",");
   return `ARRAY[${escaped}]::text[]`;
+}
+
+async function deleteFromOptionalTable(
+  tableName: string,
+  columnName: string,
+  value: string,
+): Promise<void> {
+  await db.execute(
+    sql`DELETE FROM ${sql.identifier(tableName)} WHERE ${sql.identifier(columnName)} = ${value}`,
+  ).catch((err: unknown) => {
+    const cause = err instanceof Error ? err.cause : undefined;
+    if (
+      (typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        err.code === "42P01") ||
+      (typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        cause.code === "42P01")
+    ) {
+      return;
+    }
+    throw err;
+  });
 }
 
 export function basicAuthHeader(clientId: string, clientSecret: string): string {

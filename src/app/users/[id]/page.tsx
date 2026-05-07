@@ -38,7 +38,16 @@ export default async function UserDetailPage({
   );
 
   const userTxns = await db
-    .select()
+    .select({
+      id: transactions.id,
+      type: transactions.type,
+      amountWei: transactions.amountWei,
+      platformCutPercent: transactions.platformCutPercent,
+      platformCutWei: transactions.platformCutWei,
+      txHash: transactions.txHash,
+      status: transactions.status,
+      createdAt: transactions.createdAt,
+    })
     .from(transactions)
     .where(eq(transactions.endUserId, id));
 

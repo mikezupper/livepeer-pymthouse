@@ -21,6 +21,9 @@ interface SignerConfigFormProps {
     oidcIssuer: string;
     oidcAudience: string;
     oidcJwksUrl: string;
+    /** The signer HTTP base URL that PymtHouse will call after DB/env/default resolution. */
+    effectiveSignerUrl: string;
+    signerUrlSource: "saved" | "env" | "default";
   };
 }
 
@@ -31,7 +34,7 @@ export default function SignerConfigForm({ config }: SignerConfigFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: config.name,
-    signerUrl: config.signerUrl || "",
+    signerUrl: config.signerUrl || config.effectiveSignerUrl,
     signerApiKey: config.signerApiKey || "",
     network: config.network,
     ethRpcUrl: config.ethRpcUrl,
@@ -51,11 +54,17 @@ export default function SignerConfigForm({ config }: SignerConfigFormProps) {
     setError(null);
 
     try {
+      const signerUrl =
+        !config.signerUrl && formData.signerUrl === config.effectiveSignerUrl
+          ? undefined
+          : formData.signerUrl;
+      const { signerUrl: _effectiveSignerUrl, ...payloadFormData } = formData;
       const res = await fetch("/api/v1/signer", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...formData,
+          ...payloadFormData,
+          ...(signerUrl !== undefined ? { signerUrl } : {}),
           network: "arbitrum-one-mainnet",
           ethAcctAddr: formData.ethAcctAddr || null,
           signerPort: formData.signerPort,
@@ -156,8 +165,19 @@ export default function SignerConfigForm({ config }: SignerConfigFormProps) {
               setFormData({ ...formData, signerUrl: e.target.value })
             }
             className="w-full px-3 py-2 bg-zinc-800/50 border border-zinc-700 rounded-lg text-sm text-zinc-200 focus:outline-none focus:border-emerald-500/50"
-            placeholder="https://signer.example.com"
+            placeholder={config.effectiveSignerUrl}
           />
+          <p className="text-xs text-zinc-600 mt-0.5">
+            Effective signer HTTP base URL ({config.signerUrlSource === "saved"
+              ? "saved override"
+              : config.signerUrlSource === "env"
+                ? "from SIGNER_INTERNAL_URL"
+                : "default fallback"}
+            ). This must point to Apache/DMZ on the host, usually{" "}
+            <code className="text-zinc-500">http://127.0.0.1:8080</code>.
+            Do not use livepeer&apos;s in-container{" "}
+            <code className="text-zinc-500">127.0.0.1:8081</code> here.
+          </p>
         </div>
         <div>
           <label className="block text-xs text-zinc-500 mb-1.5">

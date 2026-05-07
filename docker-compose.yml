@@ -17,6 +17,7 @@ services:
       - PORT=8080
       - CLI_PORT=8082
       - SIGNER_PORT=8081
+      - SIGNER_READY_TIMEOUT_SECONDS=${SIGNER_READY_TIMEOUT_SECONDS:-300}
       - SIGNER_NETWORK=${SIGNER_NETWORK:-arbitrum-one-mainnet}
       - ETH_RPC_URL=${ETH_RPC_URL:-https://arb1.arbitrum.io/rpc}
       - SIGNER_ETH_ADDR=${SIGNER_ETH_ADDR:-}
@@ -31,6 +32,8 @@ services:
       - OIDC_ISSUER=${OIDC_ISSUER:-}
       - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
       - JWKS_URI=${JWKS_URI:-}
+      # Set to 1 when JWKS is HTTPS with a self-signed / corporate CA (local dev).
+      - JWKS_TLS_INSECURE=${JWKS_TLS_INSECURE:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

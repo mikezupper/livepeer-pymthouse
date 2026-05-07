@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { db } from "@/db/index";
 import { users, endUsers, sessions, streamSessions, transactions } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import Link from "next/link";
 import DashboardLayout from "@/components/DashboardLayout";
 import UserTable from "@/components/UserTable";
@@ -33,8 +33,10 @@ export default async function UsersPage() {
         .from(streamSessions)
         .where(eq(streamSessions.endUserId, user.id));
 
-      const userTxns = await db
-        .select()
+      const [txnCountRow] = await db
+        .select({
+          transactionCount: sql<number>`cast(count(${transactions.id}) as integer)`.mapWith(Number),
+        })
         .from(transactions)
         .where(eq(transactions.endUserId, user.id));
 
@@ -42,7 +44,7 @@ export default async function UsersPage() {
         ...user,
         tokenCount: userSessionRows.length,
         streamCount: userStreams.length,
-        transactionCount: userTxns.length,
+        transactionCount: txnCountRow.transactionCount,
       };
     }),
   );
