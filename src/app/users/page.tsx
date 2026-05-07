@@ -44,7 +44,7 @@ export default async function UsersPage() {
         ...user,
         tokenCount: userSessionRows.length,
         streamCount: userStreams.length,
-        transactionCount: txnCountRow?.transactionCount ?? 0,
+        transactionCount: txnCountRow.transactionCount,
       };
     }),
   );

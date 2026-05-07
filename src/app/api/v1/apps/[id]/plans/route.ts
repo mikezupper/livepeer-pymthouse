@@ -15,11 +15,12 @@ import { resolvePlansDiscoveryForApp } from "@/lib/discovery-profile-resolve";
 async function requireOwnedDiscoveryProfile(
   appId: string,
   discoveryProfileId: string | null,
+  executor: Pick<typeof db, "select"> = db,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (discoveryProfileId === null) {
     return { ok: true };
   }
-  const row = await db
+  const row = await executor
     .select({ id: discoveryProfiles.id })
     .from(discoveryProfiles)
     .where(
@@ -337,11 +338,6 @@ export async function POST(
       );
     }
   }
-  const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileId);
-  if (!profCheck.ok) {
-    return NextResponse.json({ error: profCheck.error }, { status: 400 });
-  }
-
   const planType = String(body.type || "free");
   const billing = resolveBillingFieldsForPost(planType, body);
   if (!billing.ok) {
@@ -366,43 +362,60 @@ export async function POST(
 
   const planId = uuidv4();
   const now = new Date().toISOString();
-  await db.transaction(async (tx) => {
-    await tx.insert(plans).values({
-      id: planId,
-      clientId: appId,
-      name,
-      type: planType,
-      priceAmount: String(body.priceAmount || "0"),
-      priceCurrency: String(body.priceCurrency || "USD"),
-      status: String(body.status || "active"),
-      includedUnits:
-        billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
-      overageRateWei:
-        billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
-      includedUsdMicros,
-      generalUpchargePercentBps: generalUpcharge.value,
-      payPerUseUpchargePercentBps: payPerUseUpcharge.value,
-      billingCycle: typeof body.billingCycle === "string" ? body.billingCycle : "monthly",
-      discoveryProfileId,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    for (const capability of parsedCapabilities.capabilities) {
-      await tx.insert(planCapabilityBundles).values({
-        id: uuidv4(),
-        planId,
+  try {
+    await db.transaction(async (tx) => {
+      const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileId, tx);
+      if (!profCheck.ok) {
+        throw Object.assign(new Error(profCheck.error), { code: "DISCOVERY_PROFILE" as const });
+      }
+      await tx.insert(plans).values({
+        id: planId,
         clientId: appId,
-        pipeline: capability.pipeline,
-        modelId: capability.modelId,
-        slaTargetScore: capability.slaTargetScore ?? null,
-        slaTargetP95Ms: capability.slaTargetP95Ms ?? null,
-        maxPricePerUnit: capability.maxPricePerUnit,
-        upchargePercentBps: capability.upchargePercentBps,
+        name,
+        type: planType,
+        priceAmount: String(body.priceAmount || "0"),
+        priceCurrency: String(body.priceCurrency || "USD"),
+        status: String(body.status || "active"),
+        includedUnits:
+          billing.includedUnits !== null ? BigInt(billing.includedUnits) : null,
+        overageRateWei:
+          billing.overageRateWei !== null ? BigInt(billing.overageRateWei) : null,
+        includedUsdMicros,
+        generalUpchargePercentBps: generalUpcharge.value,
+        payPerUseUpchargePercentBps: payPerUseUpcharge.value,
+        billingCycle: typeof body.billingCycle === "string" ? body.billingCycle : "monthly",
+        discoveryProfileId,
         createdAt: now,
+        updatedAt: now,
       });
+
+      for (const capability of parsedCapabilities.capabilities) {
+        await tx.insert(planCapabilityBundles).values({
+          id: uuidv4(),
+          planId,
+          clientId: appId,
+          pipeline: capability.pipeline,
+          modelId: capability.modelId,
+          slaTargetScore: capability.slaTargetScore ?? null,
+          slaTargetP95Ms: capability.slaTargetP95Ms ?? null,
+          maxPricePerUnit: capability.maxPricePerUnit,
+          upchargePercentBps: capability.upchargePercentBps,
+          createdAt: now,
+        });
+      }
+    });
+  } catch (e: unknown) {
+    if (
+      e &&
+      typeof e === "object" &&
+      "code" in e &&
+      (e as { code?: string }).code === "DISCOVERY_PROFILE" &&
+      e instanceof Error
+    ) {
+      return NextResponse.json({ error: e.message }, { status: 400 });
     }
-  });
+    throw e;
+  }
 
   return NextResponse.json({ id: planId }, { status: 201 });
 }
@@ -449,13 +462,6 @@ export async function PUT(
       );
     }
   }
-  if (discoveryProfileIdPut !== undefined && discoveryProfileIdPut !== null) {
-    const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileIdPut);
-    if (!profCheck.ok) {
-      return NextResponse.json({ error: profCheck.error }, { status: 400 });
-    }
-  }
-
   let parsedCapabilities: ReturnType<typeof parseCapabilities> | null = null;
   if (body.capabilities !== undefined) {
     try {
@@ -482,6 +488,13 @@ export async function PUT(
     const existing = existingRows[0];
     if (!existing) {
       return { tag: "notfound" as const };
+    }
+
+    if (discoveryProfileIdPut !== undefined && discoveryProfileIdPut !== null) {
+      const profCheck = await requireOwnedDiscoveryProfile(appId, discoveryProfileIdPut, tx);
+      if (!profCheck.ok) {
+        return { tag: "validation" as const, error: profCheck.error };
+      }
     }
 
     const nextType = body.type !== undefined ? String(body.type) : existing.type;
