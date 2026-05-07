@@ -1,12 +1,12 @@
 /**
  * NaaP pipeline catalog and pricing client.
  *
- * Provides cached access to two NaaP endpoints:
- *  - /v1/dashboard/pipeline-catalog  → pipeline list with models
- *  - /v1/dashboard/pricing           → per-orchestrator pricing rows
+ * Provides access to two NaaP endpoints:
+ *  - /v1/dashboard/pipeline-catalog  → pipeline list with models (short TTL cache)
+ *  - /v1/dashboard/pricing           → per-orchestrator pricing rows (uncached; each call fetches)
  *
- * Pricing rows are used at signing time to validate that the signed ticket
- * price matches the advertised price for the claimed pipeline/model/orchestrator.
+ * Signing / `generate-live-payment` does not use this module for validation; it uses
+ * the negotiated ticket facts from the request body (python-gateway + signer).
  */
 
 const NAAP_API_BASE_URL =
@@ -36,7 +36,7 @@ export interface PricingRow {
   isWarm?: boolean;
 }
 
-// ─── In-memory TTL caches ────────────────────────────────────────────────────
+// ─── In-memory TTL cache (pipeline catalog only) ────────────────────────────
 
 interface CacheEntry<T> {
   data: T;
@@ -44,10 +44,8 @@ interface CacheEntry<T> {
 }
 
 const CATALOG_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const PRICING_TTL_MS = 60 * 1000; // 1 minute (pricing can change more rapidly)
 
 let catalogCache: CacheEntry<PipelineCatalogEntry[]> | null = null;
-let pricingCache: CacheEntry<PricingRow[]> | null = null;
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -61,7 +59,7 @@ function parseCatalogEntry(raw: unknown, index: number): PipelineCatalogEntry | 
     ? (r.models as unknown[]).filter((m): m is string => typeof m === "string" && m.trim() !== "")
     : [];
   const regions = Array.isArray(r.regions)
-    ? (r.regions as unknown[]).filter((m): m is string => typeof m === "string")
+    ? (r.regions as unknown[]).filter((m): m is string => typeof m === "string")---------------
     : undefined;
   return { id, name, models, regions };
 }
@@ -122,6 +120,19 @@ async function naapGet(path: string): Promise<unknown> {
   return res.json();
 }
 
+async function fetchDashboardPricingFromNetwork(): Promise<PricingRow[]> {
+  const raw = await naapGet("/dashboard/pricing");
+  if (!Array.isArray(raw)) {
+    throw new Error("NaaP pricing response is not an array");
+  }
+  const rows: PricingRow[] = [];
+  for (const item of raw) {
+    const row = parsePricingRow(item);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /** Fetch (and cache) the NaaP pipeline catalog. */
@@ -142,48 +153,9 @@ export async function fetchPipelineCatalog(): Promise<PipelineCatalogEntry[]> {
   return entries;
 }
 
-/**
- * In-memory pricing snapshot only (no network). Used on hot paths such as
- * `generate-live-payment` so signing never waits on NaaP.
- */
-export function getCachedDashboardPricing(): PricingRow[] | null {
-  if (pricingCache && pricingCache.expiresAt > Date.now()) {
-    return pricingCache.data;
-  }
-  return null;
-}
-
-/**
- * Refresh pricing from NaaP and update the in-memory cache. Call from non-hot
- * paths (e.g. `GET /api/v1/pipeline-pricing`) or tests that need a primed cache.
- */
-export async function refreshDashboardPricing(): Promise<PricingRow[]> {
-  const raw = await naapGet("/dashboard/pricing");
-  if (!Array.isArray(raw)) {
-    throw new Error("NaaP pricing response is not an array");
-  }
-  const rows: PricingRow[] = [];
-  for (const item of raw) {
-    const row = parsePricingRow(item);
-    if (row) rows.push(row);
-  }
-  pricingCache = { data: rows, expiresAt: Date.now() + PRICING_TTL_MS };
-  return rows;
-}
-
-/** Fetch (and cache) NaaP per-orchestrator pricing rows — cache read, else network refresh. */
+/** Fetch NaaP per-orchestrator pricing rows (always hits NaaP; no in-process cache). */
 export async function fetchDashboardPricing(): Promise<PricingRow[]> {
-  const cached = getCachedDashboardPricing();
-  if (cached !== null) {
-    return cached;
-  }
-  return refreshDashboardPricing();
-}
-
-/** Invalidate in-memory caches (useful for tests). */
-export function invalidateNaapCaches(): void {
-  catalogCache = null;
-  pricingCache = null;
+  return fetchDashboardPricingFromNetwork();
 }
 
 /**

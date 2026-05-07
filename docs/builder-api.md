@@ -256,8 +256,9 @@ Requests that fail auth or tenant match receive **`404 Not Found`** (not `401`/`
 | --- | --- | --- | --- |
 | `startDate` | ISO 8601 | — | Inclusive lower bound on `usage_records.created_at` |
 | `endDate` | ISO 8601 | — | Inclusive upper bound |
-| `groupBy` | `none` \| `user` | `none` | `user` adds a `byUser` array |
-| `userId` | string | — | Filter to one internal **`endUserId`** (not `externalUserId`) |
+| `groupBy` | `none` \| `user` \| `pipeline_model` | `none` | `user` adds `byUser`; `pipeline_model` adds `byPipelineModel` (requires matching billing events) |
+| `userId` | string | — | Filter to one internal **`usage_records.user_id`** (not `externalUserId`) |
+| `gatewayRequestId` | string | — | When set, filters billing events to that gateway request and may include `events` detail |
 
 Invalid dates return `400 Bad Request`. Resolve `externalUserId` → internal id via the Builder user listing or a prior `groupBy=user` response.
 
@@ -370,14 +371,14 @@ Returns `{ ethUsd: { priceUsd, source, observedAt, isFallback } }`.
 
 ### Trusted pipeline/model attribution
 
-Billable **`usage_billing_events`** rows require a pipeline/model constraint **and** a cache-backed match between the signed ticket’s `priceWeiPerUnit` / `pixelsPerUnit` and NaaP’s advertised price for that pipeline/model/orchestrator.
+Billable **`usage_billing_events`** rows are created when the signing request resolves to a pipeline/model constraint. Price evidence (`priceWeiPerUnit` / `pixelsPerUnit` and orchestrator address) comes from the **negotiated ticket** on the request (decoded orchestrator info), i.e. the price agreed with the orchestrator by **`python-gateway`** before signing — PymtHouse does **not** call NaaP on this hot path.
 
 1. **Constraint:** `pipeline` + `modelId` on the payment request (from the `python-gateway` metadata envelope or a direct API caller), **or** base64 **`capabilities`** (`net.Capabilities`) from which PymtHouse can derive a single pipeline/model (same shape the Go remote signer uses).
-2. **Cached pricing only on the signing path:** `POST /api/signer/generate-live-payment` does **not** call NaaP. It reads **`getCachedDashboardPricing()`** after the signer succeeds. Populate/refresh the cache via **`GET /api/v1/pipeline-pricing`** (or other callers of **`fetchDashboardPricing()`** / **`refreshDashboardPricing()`**).
-3. **Validation:** When cache and constraint are present, PymtHouse compares signed vs advertised units; **`usage_billing_events`** is inserted only when validation status is **`matched`**.
-4. **Diagnostics:** **`transactions`** always records metering when the signer succeeds and `feeWei > 0`; **`price_validation_status`** / **`price_validation_reason`** describe outcomes such as **`missing_constraint`**, **`pricing_unavailable`**, or **`price_mismatch`**. Signing is **not** blocked by missing cache or mismatch — the gateway still receives the signer response.
+2. **No NaaP fetch on signing:** `POST /api/signer/generate-live-payment` does not load dashboard pricing for validation. **`GET /api/v1/pipeline-pricing`** still proxies NaaP for UIs; it uses **`fetchDashboardPricing()`** without an in-process pricing cache.
+3. **Ledger insert:** When a constraint is present, PymtHouse records **`usage_billing_events`** using the signed ticket units and a **`pipeline_model_constraint_hash`** over `{ pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }`. **`price_validation_status`** is **`matched`** in that case.
+4. **Diagnostics:** **`transactions`** always records metering when the signer succeeds and `feeWei > 0`. If no pipeline/model can be resolved, **`price_validation_status`** is **`missing_constraint`** and no **`usage_billing_events`** row is written. Older rows may still show legacy statuses such as **`pricing_unavailable`**. Signing is **not** blocked by attribution gaps — the gateway still receives the signer response.
 
-Client-supplied pipeline/model labels are claims until validated against cached advertised pricing.
+**Usage API:** `groupBy=pipeline_model` aggregates from **`usage_billing_events`**, so breakdown rows appear for new traffic that includes `pipeline` + `modelId` (or derivable capabilities) on each payment.
 
 #### Gateway payment metadata contract
 
@@ -393,14 +394,14 @@ Client-supplied pipeline/model labels are claims until validated against cached 
 }
 ```
 
-PymtHouse treats these as claims and validates them against NaaP pricing. The go-livepeer remote signer is not required to sign pipeline/model metadata for v1.
+PymtHouse uses these fields for attribution and billing-event grouping together with the negotiated ticket price from the request. The go-livepeer remote signer is not required to sign pipeline/model metadata for v1.
 
 ### NaaP catalog and pricing routes
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/v1/pipeline-catalog` | NaaP pipeline catalog (cached 5 min). Used by Plans UI dropdowns. |
-| `GET /api/v1/pipeline-pricing?pipeline=...&model=...` | NaaP per-orchestrator pricing rows (cached 60 s). Used for price validation and UI estimates. |
+| `GET /api/v1/pipeline-pricing?pipeline=...&model=...` | NaaP per-orchestrator pricing rows (proxied each request; no in-process cache). Used for UI estimates. |
 
 ### Usage API — pipeline/model grouping
 
@@ -583,7 +584,7 @@ curl -sS -u "${CLIENT_ID}:${CLIENT_SECRET}" \
 - [`src/lib/billing-runtime.ts`](../src/lib/billing-runtime.ts) (pipeline/model validation, upcharge resolution, USD micros)
 - [`src/lib/prices/public-exchange-spot.ts`](../src/lib/prices/public-exchange-spot.ts) (Binance/Kraken spot fetch)
 - [`src/lib/prices/eth-usd-oracle.ts`](../src/lib/prices/eth-usd-oracle.ts) (ETH/USD oracle with DB cache)
-- [`src/lib/naap-catalog.ts`](../src/lib/naap-catalog.ts) (NaaP catalog and pricing with TTL cache)
+- [`src/lib/naap-catalog.ts`](../src/lib/naap-catalog.ts) (NaaP catalog with TTL cache; pricing fetch is uncached)
 - [`src/app/api/v1/prices/eth-usd/route.ts`](../src/app/api/v1/prices/eth-usd/route.ts)
 - [`src/app/api/v1/pipeline-catalog/route.ts`](../src/app/api/v1/pipeline-catalog/route.ts)
 - [`src/app/api/v1/pipeline-pricing/route.ts`](../src/app/api/v1/pipeline-pricing/route.ts)

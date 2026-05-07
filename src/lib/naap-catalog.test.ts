@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { filterPricingRows, invalidateNaapCaches } from "./naap-catalog";
+import { filterPricingRows } from "./naap-catalog";
 import type { PricingRow } from "./naap-catalog";
 
 const rows: PricingRow[] = [
@@ -44,6 +44,3 @@ test("filterPricingRows: correct model filtering", () => {
   assert.equal(result[0].model, "controlnet");
 });
 
-test("invalidateNaapCaches does not throw", () => {
-  assert.doesNotThrow(() => invalidateNaapCaches());
-});

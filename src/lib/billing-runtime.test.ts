@@ -5,15 +5,14 @@ import protobuf from "protobufjs";
 
 import {
   buildConstraintHash,
+  buildSignedTicketConstraintHash,
   computeUsdMicrosFromWei,
   resolveGatewayAttribution,
   resolvePaymentPipelineModelConstraint,
   resolveRequestPipelineModelConstraint,
   resolveUpcharge,
-  validateSignedTicketPriceForPipelineModel,
   weiToEthString,
 } from "./billing-runtime";
-import type { PricingRow } from "./naap-catalog";
 
 // ─── resolveRequestPipelineModelConstraint ────────────────────────────────────
 
@@ -116,87 +115,37 @@ test("resolveGatewayAttribution defaults attributionSource to direct_api", () =>
   assert.equal(result.paymentMetadataVersion, null);
 });
 
-// ─── validateSignedTicketPriceForPipelineModel ────────────────────────────────
+// ─── buildSignedTicketConstraintHash ──────────────────────────────────────────
 
-const pricingRows: PricingRow[] = [
-  {
-    orchAddress: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12",
-    pipeline: "text-to-image",
-    model: "stabilityai/sdxl",
-    priceWeiPerUnit: "1000000000",
-    pixelsPerUnit: "1",
-  },
-  {
-    orchAddress: "0x1111111111111111111111111111111111111111",
-    pipeline: "image-to-image",
-    model: "another/model",
-    priceWeiPerUnit: "500000000",
-    pixelsPerUnit: "2",
-  },
-];
-
-test("validateSignedTicketPriceForPipelineModel: exact match returns matched", () => {
-  const result = validateSignedTicketPriceForPipelineModel({
+test("buildSignedTicketConstraintHash matches buildConstraintHash for same tuple", () => {
+  const params = {
     pipeline: "text-to-image",
     modelId: "stabilityai/sdxl",
     orchAddress: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12",
-    signedPriceWeiPerUnit: 1_000_000_000n,
-    signedPixelsPerUnit: 1n,
-    pricingRows,
-  });
-  assert.equal(result.status, "matched");
-  if (result.status === "matched") {
-    assert.equal(result.matchedRow.pipeline, "text-to-image");
-    assert.ok(result.pipelineModelConstraintHash.length === 64); // SHA-256 hex
-  }
+    signedPriceWeiPerUnit: "1000000000",
+    signedPixelsPerUnit: "1",
+  };
+  assert.equal(
+    buildSignedTicketConstraintHash(params),
+    buildConstraintHash({
+      pipeline: params.pipeline,
+      modelId: params.modelId,
+      orchAddress: params.orchAddress,
+      priceWeiPerUnit: params.signedPriceWeiPerUnit,
+      pixelsPerUnit: params.signedPixelsPerUnit,
+    }),
+  );
 });
 
-test("validateSignedTicketPriceForPipelineModel: unknown pipeline/model returns unknown_pipeline_model", () => {
-  const result = validateSignedTicketPriceForPipelineModel({
-    pipeline: "audio-generation",
-    modelId: "unknown/model",
-    orchAddress: undefined,
-    signedPriceWeiPerUnit: 1_000_000_000n,
-    signedPixelsPerUnit: 1n,
-    pricingRows,
-  });
-  assert.equal(result.status, "unknown_pipeline_model");
-});
-
-test("validateSignedTicketPriceForPipelineModel: price mismatch returns price_mismatch", () => {
-  const result = validateSignedTicketPriceForPipelineModel({
-    pipeline: "text-to-image",
-    modelId: "stabilityai/sdxl",
-    orchAddress: undefined,
-    signedPriceWeiPerUnit: 9_999_999n, // wrong price
-    signedPixelsPerUnit: 1n,
-    pricingRows,
-  });
-  assert.equal(result.status, "price_mismatch");
-});
-
-test("validateSignedTicketPriceForPipelineModel: unit mismatch returns price_mismatch", () => {
-  const result = validateSignedTicketPriceForPipelineModel({
-    pipeline: "text-to-image",
-    modelId: "stabilityai/sdxl",
-    orchAddress: undefined,
-    signedPriceWeiPerUnit: 1_000_000_000n,
-    signedPixelsPerUnit: 99n, // wrong pixels
-    pricingRows,
-  });
-  assert.equal(result.status, "price_mismatch");
-});
-
-test("validateSignedTicketPriceForPipelineModel: empty pricingRows returns unknown_pipeline_model", () => {
-  const result = validateSignedTicketPriceForPipelineModel({
-    pipeline: "text-to-image",
-    modelId: "stabilityai/sdxl",
-    orchAddress: undefined,
-    signedPriceWeiPerUnit: 1_000_000_000n,
-    signedPixelsPerUnit: 1n,
-    pricingRows: [],
-  });
-  assert.equal(result.status, "unknown_pipeline_model");
+test("buildSignedTicketConstraintHash is deterministic", () => {
+  const params = {
+    pipeline: "p",
+    modelId: "m",
+    orchAddress: "0xabcd",
+    signedPriceWeiPerUnit: "1",
+    signedPixelsPerUnit: "1",
+  };
+  assert.equal(buildSignedTicketConstraintHash(params), buildSignedTicketConstraintHash(params));
 });
 
 // ─── buildConstraintHash ──────────────────────────────────────────────────────

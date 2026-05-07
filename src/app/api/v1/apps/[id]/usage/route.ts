@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateAppClient } from "@/lib/auth";
 import { db } from "@/db/index";
-import { appUsers, usageBillingEvents, usageRecords } from "@/db/schema";
+import { appUsers, endUsers, usageBillingEvents, usageRecords } from "@/db/schema";
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { getAuthorizedProviderApp, getProviderApp } from "@/lib/provider-apps";
 import { weiToEthString } from "@/lib/billing-runtime";
@@ -142,9 +142,35 @@ export async function GET(
       ? await db.select().from(appUsers).where(inArray(appUsers.id, userIds))
       : [];
     const appUserMap = new Map(appUserRows.map((u) => [u.id, u]));
+    const appUserRowsByExternal = userIds.length > 0
+      ? await db.select().from(appUsers).where(inArray(appUsers.externalUserId, userIds))
+      : [];
+    const appUserExternalMap = new Map(appUserRowsByExternal.map((u) => [u.externalUserId, u]));
+
+    const endUserRows =
+      userIds.length > 0
+        ? await db
+            .select({ id: endUsers.id, externalUserId: endUsers.externalUserId })
+            .from(endUsers)
+            .where(and(eq(endUsers.appId, app.id), inArray(endUsers.id, userIds)))
+        : [];
+    const endUserMap = new Map(endUserRows.map((u) => [u.id, u]));
+    const endUserRowsByExternal =
+      userIds.length > 0
+        ? await db
+            .select({ id: endUsers.id, externalUserId: endUsers.externalUserId })
+            .from(endUsers)
+            .where(and(eq(endUsers.appId, app.id), inArray(endUsers.externalUserId, userIds)))
+        : [];
+    const endUserExternalMap = new Map(endUserRowsByExternal.map((u) => [u.externalUserId, u]));
 
     response.byUser = [...byUserMap.entries()].map(([endUserId, data]) => {
-      const externalUserId = appUserMap.get(endUserId)?.externalUserId || null;
+      const externalUserId =
+        appUserMap.get(endUserId)?.externalUserId ??
+        appUserExternalMap.get(endUserId)?.externalUserId ??
+        endUserMap.get(endUserId)?.externalUserId ??
+        endUserExternalMap.get(endUserId)?.externalUserId ??
+        null;
       let userType: UsageUserType = "unknown";
       if (externalUserId) userType = "system_managed";
       else if (endUserId !== "unknown") userType = "oidc_authorized";

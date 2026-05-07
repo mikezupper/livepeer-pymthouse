@@ -5,19 +5,14 @@
  * proxyGenerateLivePayment() after the go-livepeer remote signer succeeds.
  *
  * Core invariant:
- *   A billable usage_billing_events row is only created when:
- *   1. The signing request includes an explicit pipeline/model constraint.
- *   2. Cached NaaP pricing is available and the signed ticket price/unit facts
- *      match the advertised price for that exact pipeline/model/orchestrator.
- *
- * The live payment hot path does not fetch NaaP; it reads the in-process cache
- * only (`getCachedDashboardPricing`). UI and `GET /api/v1/pipeline-pricing`
- * refresh that cache.
+ *   A billable usage_billing_events row is created when the signing request
+ *   resolves to an explicit pipeline/model constraint (body fields or
+ *   capabilities). Price evidence comes from the negotiated ticket on the
+ *   request (orchestrator info decoded by PymtHouse), not from a separate NaaP
+ *   pricing fetch on the hot path.
  */
 
 import crypto from "crypto";
-import type { PricingRow } from "./naap-catalog";
-import type { EthUsdOracleResult } from "./prices/eth-usd-oracle";
 import type { planCapabilityBundles, plans } from "@/db/schema";
 import { extractPipelineModelFromCapabilitiesBase64 } from "./proto";
 
@@ -33,27 +28,6 @@ export interface GatewayAttribution {
   gatewayRequestId: string | null;
   paymentMetadataVersion: string | null;
 }
-
-export type PriceValidationStatus =
-  | "matched"
-  | "missing_constraint"
-  | "pricing_unavailable"
-  | "unknown_pipeline_model"
-  | "missing_advertised_price"
-  | "price_mismatch";
-
-export interface PriceValidationSuccess {
-  status: "matched";
-  matchedRow: PricingRow;
-  pipelineModelConstraintHash: string;
-}
-
-export interface PriceValidationFailure {
-  status: Exclude<PriceValidationStatus, "matched">;
-  reason: string;
-}
-
-export type PriceValidationResult = PriceValidationSuccess | PriceValidationFailure;
 
 export interface BillingContext {
   planId: string | null;
@@ -132,9 +106,9 @@ function pickString(body: Record<string, unknown>, key: string): string | null {
 }
 
 /**
- * Build a stable, deterministic constraint hash for a matched pricing row.
+ * Build a stable, deterministic constraint hash.
  * The hash covers the five facts that uniquely identify a priced pipeline/model
- * slot on a specific orchestrator.
+ * slot on a specific orchestrator (pipeline, modelId, orch, wei/unit, pixels/unit).
  */
 export function buildConstraintHash(params: {
   pipeline: string;
@@ -154,82 +128,23 @@ export function buildConstraintHash(params: {
 }
 
 /**
- * Validate the signed ticket price facts against the NaaP advertised price for
- * the requested pipeline/model.
- *
- * Match criteria:
- *  - Exact pipeline + model match.
- *  - Exact orchAddress match when the signed request exposes one.
- *  - Exact priceWeiPerUnit equality.
- *  - Exact pixelsPerUnit equality.
- *
- * Fails closed on missing, ambiguous, or mismatched pricing.
+ * Constraint hash for the negotiated ticket: same tuple as buildConstraintHash,
+ * using the signed wei/unit and pixels/unit strings from the request.
  */
-export function validateSignedTicketPriceForPipelineModel(params: {
+export function buildSignedTicketConstraintHash(params: {
   pipeline: string;
   modelId: string;
-  orchAddress: string | undefined;
-  signedPriceWeiPerUnit: bigint;
-  signedPixelsPerUnit: bigint;
-  pricingRows: PricingRow[];
-}): PriceValidationResult {
-  const { pipeline, modelId, orchAddress, signedPriceWeiPerUnit, signedPixelsPerUnit, pricingRows } = params;
-
-  // Filter by pipeline + model first
-  const candidates = pricingRows.filter(
-    (r) => r.pipeline === pipeline && r.model === modelId,
-  );
-
-  if (candidates.length === 0) {
-    return {
-      status: "unknown_pipeline_model",
-      reason: `No advertised pricing found for pipeline="${pipeline}" model="${modelId}"`,
-    };
-  }
-
-  // Further filter by orchAddress when available
-  const addressFiltered =
-    orchAddress && orchAddress !== "0x"
-      ? candidates.filter(
-          (r) => r.orchAddress.toLowerCase() === orchAddress.toLowerCase(),
-        )
-      : candidates;
-
-  const pool = addressFiltered.length > 0 ? addressFiltered : candidates;
-
-  // Match by exact price/unit
-  const matched = pool.filter((r) => {
-    try {
-      return (
-        BigInt(r.priceWeiPerUnit) === signedPriceWeiPerUnit &&
-        BigInt(r.pixelsPerUnit) === signedPixelsPerUnit
-      );
-    } catch {
-      return false;
-    }
+  orchAddress: string;
+  signedPriceWeiPerUnit: string;
+  signedPixelsPerUnit: string;
+}): string {
+  return buildConstraintHash({
+    pipeline: params.pipeline,
+    modelId: params.modelId,
+    orchAddress: params.orchAddress,
+    priceWeiPerUnit: params.signedPriceWeiPerUnit,
+    pixelsPerUnit: params.signedPixelsPerUnit,
   });
-
-  if (matched.length === 0) {
-    const advertised = pool
-      .map((r) => `${r.priceWeiPerUnit}/${r.pixelsPerUnit}`)
-      .join(", ");
-    return {
-      status: "price_mismatch",
-      reason: `Signed price ${signedPriceWeiPerUnit}/${signedPixelsPerUnit} does not match advertised [${advertised}] for pipeline="${pipeline}" model="${modelId}"`,
-    };
-  }
-
-  // Use the first matching row (there should only be one per orch+pipeline+model)
-  const row = matched[0];
-  const hash = buildConstraintHash({
-    pipeline,
-    modelId,
-    orchAddress: row.orchAddress,
-    priceWeiPerUnit: row.priceWeiPerUnit,
-    pixelsPerUnit: row.pixelsPerUnit,
-  });
-
-  return { status: "matched", matchedRow: row, pipelineModelConstraintHash: hash };
 }
 
 /**

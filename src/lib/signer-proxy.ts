@@ -1,6 +1,8 @@
 import { db } from "@/db/index";
 import {
+  appUsers,
   developerApps,
+  endUsers,
   oidcClients,
   planCapabilityBundles,
   plans,
@@ -24,15 +26,13 @@ import { getSenderInfo } from "./signer-cli";
 import { DOCKER_COMPOSE_LOCAL_SIGNER_SERVICE } from "./signer-local-compose";
 import { getIssuer } from "./oidc/issuer-urls";
 import { getEthUsdOracle } from "./prices/eth-usd-oracle";
-import { getCachedDashboardPricing } from "./naap-catalog";
 import {
   resolvePaymentPipelineModelConstraint,
   resolveGatewayAttribution,
-  validateSignedTicketPriceForPipelineModel,
+  buildSignedTicketConstraintHash,
   resolveUpcharge,
   computeUsdMicrosFromWei,
   weiToEthString,
-  type PriceValidationResult,
 } from "./billing-runtime";
 
 export interface ProxyResult {
@@ -75,6 +75,33 @@ export async function getSignerRoutingContext(authAppId?: string | null) {
   const signer = await getDefaultSigner();
   const providerAppId = await resolveDeveloperAppIdFromAuthAppId(authAppId);
   return { signer, providerAppId };
+}
+
+async function resolveUsageUserIdentifier(
+  auth: AuthResult,
+  providerAppId: string | null,
+): Promise<string | null> {
+  if (!providerAppId) return auth.userId || auth.endUserId || null;
+
+  if (auth.endUserId) {
+    const rows = await db
+      .select({ externalUserId: endUsers.externalUserId })
+      .from(endUsers)
+      .where(and(eq(endUsers.id, auth.endUserId), eq(endUsers.appId, providerAppId)))
+      .limit(1);
+    return rows[0]?.externalUserId || auth.endUserId;
+  }
+
+  if (auth.userId) {
+    const rows = await db
+      .select({ externalUserId: appUsers.externalUserId })
+      .from(appUsers)
+      .where(and(eq(appUsers.id, auth.userId), eq(appUsers.clientId, providerAppId)))
+      .limit(1);
+    return rows[0]?.externalUserId || auth.userId;
+  }
+
+  return null;
 }
 
 /**
@@ -368,31 +395,31 @@ function formatDmzTokenForLog(authz: string | undefined) {
 
 function pickConflictingStringAliases(
   body: Record<string, unknown>,
-  lowerKey: string,
-  pascalKey: string,
+  ...keys: string[]
 ):
   | { ok: true; value: string | undefined }
   | { ok: false; message: string } {
-  const rawLo = body[lowerKey];
-  const rawHi = body[pascalKey];
-  const definedLo = rawLo !== undefined && rawLo !== null && `${rawLo}`.length > 0;
-  const definedHi = rawHi !== undefined && rawHi !== null && `${rawHi}`.length > 0;
-  const lo = definedLo ? String(rawLo) : undefined;
-  const hi = definedHi ? String(rawHi) : undefined;
-  if (lo !== undefined && hi !== undefined && lo !== hi) {
+  const values = keys
+    .map((key) => {
+      const raw = body[key];
+      const defined = raw !== undefined && raw !== null && `${raw}`.length > 0;
+      return defined ? { key, value: String(raw) } : null;
+    })
+    .filter((entry): entry is { key: string; value: string } => entry !== null);
+  const first = values[0];
+  const conflict = values.find((entry) => entry.value !== first?.value);
+  if (first && conflict) {
     return {
       ok: false,
-      message: `Conflicting ${lowerKey} and ${pascalKey} in request body`,
+      message: `Conflicting ${keys.join("/")} in request body`,
     };
   }
-  const value = lo ?? hi;
-  return { ok: true, value };
+  return { ok: true, value: first?.value };
 }
 
 function pickConflictingNumberAliases(
   body: Record<string, unknown>,
-  lowerKey: string,
-  pascalKey: string,
+  ...keys: string[]
 ):
   | { ok: true; value: number | undefined }
   | { ok: false; message: string } {
@@ -404,15 +431,21 @@ function pickConflictingNumberAliases(
     }
     return undefined;
   };
-  const lo = parseNum(body[lowerKey]);
-  const hi = parseNum(body[pascalKey]);
-  if (lo !== undefined && hi !== undefined && lo !== hi) {
+  const values = keys
+    .map((key) => {
+      const value = parseNum(body[key]);
+      return value !== undefined ? { key, value } : null;
+    })
+    .filter((entry): entry is { key: string; value: number } => entry !== null);
+  const first = values[0];
+  const conflict = values.find((entry) => entry.value !== first?.value);
+  if (first && conflict) {
     return {
       ok: false,
-      message: `Conflicting ${lowerKey} and ${pascalKey} in request body`,
+      message: `Conflicting ${keys.join("/")} in request body`,
     };
   }
-  return { ok: true, value: lo ?? hi };
+  return { ok: true, value: first?.value };
 }
 
 /**
@@ -482,6 +515,7 @@ export async function proxyGenerateLivePayment(
     requestBody,
     "manifestId",
     "ManifestID",
+    "manifestID",
   );
   if (!manifestPick.ok) {
     return { status: 400, body: { error: manifestPick.message } };
@@ -498,11 +532,22 @@ export async function proxyGenerateLivePayment(
   }
   const inPixels = inPixelsPick.value;
 
+  const preloadSecondsPick = pickConflictingNumberAliases(
+    requestBody,
+    "preloadSeconds",
+    "PreloadSeconds",
+  );
+  if (!preloadSecondsPick.ok) {
+    return { status: 400, body: { error: preloadSecondsPick.message } };
+  }
+  const preloadSeconds = preloadSecondsPick.value;
+
   const jobTypePick = pickConflictingStringAliases(requestBody, "type", "Type");
   if (!jobTypePick.ok) {
     return { status: 400, body: { error: jobTypePick.message } };
   }
   const jobType = jobTypePick.value;
+  const normalizedJobType = jobType?.trim().toLowerCase();
 
   const orchPick = pickConflictingStringAliases(
     requestBody,
@@ -537,8 +582,10 @@ export async function proxyGenerateLivePayment(
   let pixels: bigint;
   if (inPixels && inPixels > 0) {
     pixels = BigInt(inPixels);
-  } else if (jobType === "lv2v") {
+  } else if (normalizedJobType === "lv2v") {
     pixels = calculateLv2vPixels(1);
+  } else if (normalizedJobType === "byoc" && preloadSeconds && preloadSeconds > 0) {
+    pixels = BigInt(Math.ceil(preloadSeconds));
   } else {
     pixels = 0n;
   }
@@ -548,6 +595,7 @@ export async function proxyGenerateLivePayment(
     feeWei,
     signer.defaultCutPercent
   );
+  const usageUserId = await resolveUsageUserIdentifier(auth, providerAppId);
   const nowIso = new Date().toISOString();
   let streamSessionId: string | null = null;
 
@@ -601,25 +649,24 @@ export async function proxyGenerateLivePayment(
     );
     const responseBody = await readSignerUpstreamBody(response);
 
-    if (response.ok && feeWei > 0n) {
-      const pricingRows = getCachedDashboardPricing();
+    if (response.ok) {
+      const orchAddrForConstraint =
+        orchestratorAddress && orchestratorAddress.length > 0
+          ? orchestratorAddress
+          : "0x";
 
-      let priceValidation: PriceValidationResult | null = null;
-      if (constraint && pricingRows && pricingRows.length > 0) {
-        priceValidation = validateSignedTicketPriceForPipelineModel({
-          pipeline: constraint.pipeline,
-          modelId: constraint.modelId,
-          orchAddress: orchestratorAddress,
-          signedPriceWeiPerUnit: pricePerUnit,
-          signedPixelsPerUnit: pixelsPerUnit,
-          pricingRows,
-        });
-      }
-
-      const isMatched =
-        constraint !== null &&
-        priceValidation !== null &&
-        priceValidation.status === "matched";
+      const signedPriceStr = pricePerUnit.toString();
+      const signedPixelsStr = pixelsPerUnit.toString();
+      const pipelineModelConstraintHash =
+        constraint !== null
+          ? buildSignedTicketConstraintHash({
+              pipeline: constraint.pipeline,
+              modelId: constraint.modelId,
+              orchAddress: orchAddrForConstraint,
+              signedPriceWeiPerUnit: signedPriceStr,
+              signedPixelsPerUnit: signedPixelsStr,
+            })
+          : null;
 
       let priceValidationStatus: string;
       let priceValidationReason: string | undefined;
@@ -627,13 +674,6 @@ export async function proxyGenerateLivePayment(
         priceValidationStatus = "missing_constraint";
         priceValidationReason =
           "No pipeline/model in request (add pipeline and modelId or capabilities with PerCapability models) for full attribution.";
-      } else if (!pricingRows || pricingRows.length === 0) {
-        priceValidationStatus = "pricing_unavailable";
-        priceValidationReason =
-          "NaaP pricing not cached; price validation skipped. Populate cache via pipeline-pricing refresh.";
-      } else if (priceValidation && priceValidation.status !== "matched") {
-        priceValidationStatus = priceValidation.status;
-        priceValidationReason = priceValidation.reason;
       } else {
         priceValidationStatus = "matched";
       }
@@ -707,9 +747,6 @@ export async function proxyGenerateLivePayment(
           }
         }
 
-        const matchedPricing =
-          isMatched && priceValidation?.status === "matched" ? priceValidation : null;
-
         // Compute end-user billable: networkFee * (1 + upchargeBps/10000) in micros
         const endUserBillableUsdMicros =
           upchargeResult.bps > 0
@@ -749,9 +786,9 @@ export async function proxyGenerateLivePayment(
             attributionSource: attribution.attributionSource,
             gatewayRequestId: attribution.gatewayRequestId,
             paymentMetadataVersion: attribution.paymentMetadataVersion,
-            pipelineModelConstraintHash: matchedPricing?.pipelineModelConstraintHash ?? null,
-            advertisedPriceWeiPerUnit: matchedPricing?.matchedRow.priceWeiPerUnit ?? null,
-            advertisedPixelsPerUnit: matchedPricing?.matchedRow.pixelsPerUnit ?? null,
+            pipelineModelConstraintHash,
+            advertisedPriceWeiPerUnit: constraint ? signedPriceStr : null,
+            advertisedPixelsPerUnit: constraint ? signedPixelsStr : null,
             signedPriceWeiPerUnit: pricePerUnit.toString(),
             signedPixelsPerUnit: pixelsPerUnit.toString(),
             priceValidationStatus,
@@ -771,7 +808,7 @@ export async function proxyGenerateLivePayment(
             await tx.insert(usageRecords).values({
               id: usageRecordId,
               requestId,
-              userId: auth.userId || auth.endUserId || null,
+              userId: usageUserId,
               clientId: providerAppId,
               modelId: constraint?.modelId ?? null,
               units: pixels.toString(),
@@ -779,24 +816,24 @@ export async function proxyGenerateLivePayment(
               createdAt: new Date().toISOString(),
             });
 
-            // Billable ledger row only when cache-backed price validation matched.
-            if (matchedPricing && constraint) {
+            // Billable ledger row when pipeline/model constraint is present (negotiated ticket).
+            if (constraint) {
               await tx.insert(usageBillingEvents).values({
                 id: uuidv4(),
                 usageRecordId,
                 transactionId,
                 streamSessionId,
                 clientId: providerAppId,
-                userId: auth.userId || auth.endUserId || null,
+                userId: usageUserId,
                 pipeline: constraint.pipeline,
                 modelId: constraint.modelId,
                 attributionSource: attribution.attributionSource,
                 gatewayRequestId: attribution.gatewayRequestId,
                 paymentMetadataVersion: attribution.paymentMetadataVersion,
-                pipelineModelConstraintHash: matchedPricing.pipelineModelConstraintHash,
-                orchAddress: matchedPricing.matchedRow.orchAddress,
-                advertisedPriceWeiPerUnit: matchedPricing.matchedRow.priceWeiPerUnit,
-                advertisedPixelsPerUnit: matchedPricing.matchedRow.pixelsPerUnit,
+                pipelineModelConstraintHash,
+                orchAddress: orchestratorAddress ?? null,
+                advertisedPriceWeiPerUnit: signedPriceStr,
+                advertisedPixelsPerUnit: signedPixelsStr,
                 signedPriceWeiPerUnit: pricePerUnit.toString(),
                 signedPixelsPerUnit: pixelsPerUnit.toString(),
                 networkFeeWei: feeWei.toString(),

@@ -5,16 +5,16 @@ import type { AuthResult } from "@/lib/auth";
 import { validateBearerToken } from "@/lib/auth";
 import { db } from "@/db/index";
 import {
+  endUsers,
   planCapabilityBundles,
   plans,
   streamSessions,
   transactions,
   usageBillingEvents,
+  usageRecords,
 } from "@/db/schema";
 import { countActiveStreamsByRecentPayment } from "@/lib/active-streams";
 import { proxyGenerateLivePayment } from "@/lib/signer-proxy";
-import { invalidateNaapCaches, refreshDashboardPricing } from "@/lib/naap-catalog";
-import type { PricingRow } from "@/lib/naap-catalog";
 import { run } from "@/test-utils/db-guard";
 import {
   basicAuthHeader,
@@ -37,28 +37,7 @@ const PER_REQUEST_FEE_WEI =
 const VOLUME = 40;
 const PIPELINE = "text-to-image";
 const MODEL_ID = "stabilityai/sdxl";
-const ORCH_ADDRESS = "0x000102030405060708090a0b0c0d0e0f10111213";
 const PAYMENT_METADATA_VERSION = "2026-04-usage-attribution-v1";
-const PRICING_ROWS: PricingRow[] = [
-  {
-    orchAddress: ORCH_ADDRESS,
-    pipeline: PIPELINE,
-    model: MODEL_ID,
-    priceWeiPerUnit: PRICE_PER_UNIT.toString(),
-    pixelsPerUnit: PIXELS_PER_UNIT.toString(),
-  },
-];
-
-/** Same slot as `PRICING_ROWS` but wrong advertised wei — triggers `price_mismatch` when ticket matches `PRICING_ROWS`. */
-const PRICING_MISMATCH: PricingRow[] = [
-  {
-    orchAddress: ORCH_ADDRESS,
-    pipeline: PIPELINE,
-    model: MODEL_ID,
-    priceWeiPerUnit: (PRICE_PER_UNIT + 1).toString(),
-    pixelsPerUnit: PIXELS_PER_UNIT.toString(),
-  },
-];
 
 /**
  * Integration test:
@@ -117,14 +96,10 @@ run("high-volume signer usage is persisted and summarised via Usage API", async 
     pixelsPerUnit: PIXELS_PER_UNIT,
   });
 
-  invalidateNaapCaches();
-  t.after(invalidateNaapCaches);
   const mock = mockSignerFetch({
     signerHost: "http://test-signer.invalid",
-    dashboardPricingResponse: PRICING_ROWS,
   });
   t.after(mock.restore);
-  await refreshDashboardPricing();
 
   function paymentBody(requestId: string, manifestId: string): Record<string, unknown> {
     return {
@@ -249,8 +224,8 @@ run("high-volume signer usage is persisted and summarised via Usage API", async 
   assert.ok(Array.isArray(buckets), "byUser array present when groupBy=user");
   assert.equal(buckets!.length, 3, "three buckets: owner(user), alpha, beta");
 
-  const alphaBucket = buckets!.find((b) => b.endUserId === appUserAlpha.id);
-  const betaBucket = buckets!.find((b) => b.endUserId === appUserBeta.id);
+  const alphaBucket = buckets!.find((b) => b.endUserId === appUserAlpha.externalUserId);
+  const betaBucket = buckets!.find((b) => b.endUserId === appUserBeta.externalUserId);
   const ownerBucket = buckets!.find((b) => b.endUserId === app.userId);
 
   assert.ok(alphaBucket, "alpha end user present in byUser");
@@ -274,7 +249,7 @@ run("high-volume signer usage is persisted and summarised via Usage API", async 
   assert.equal(ownerBucket!.requestCount, ownerCount + 1, "owner bucket includes dedup single row");
 
   // userId filter: only alpha rows.
-  const alphaOnly = await fetchUsage(`?userId=${encodeURIComponent(appUserAlpha.id)}`);
+  const alphaOnly = await fetchUsage(`?userId=${encodeURIComponent(appUserAlpha.externalUserId)}`);
   assert.equal(alphaOnly.status, 200);
   const alphaTotals = (alphaOnly.body as { totals: { requestCount: number; totalFeeWei: string } }).totals;
   assert.equal(alphaTotals.requestCount, alphaCount);
@@ -303,6 +278,114 @@ run("high-volume signer usage is persisted and summarised via Usage API", async 
     { params: Promise.resolve({ id: app.clientId }) },
   );
   assert.equal(badDate.status, 400);
+});
+
+run("BYOC preload payment creates first usage row for signer sessions", async (t) => {
+  const restoreSigner = await ensureRunningSigner();
+  t.after(restoreSigner);
+
+  const app = await seedDeveloperAppWithClient({ status: "approved" });
+  t.after(() => cleanupTestApp(app));
+
+  const endUserId = randomUUID();
+  await db.insert(endUsers).values({
+    id: endUserId,
+    appId: app.clientId,
+    externalUserId: "byoc-preload-user",
+    creditBalanceWei: "0",
+  });
+
+  const token = await createJobTokenForApp({
+    endUserId,
+    clientId: app.clientId,
+    scopes: "sign:job",
+  });
+  const auth = await validateBearerToken(token);
+  assert.ok(auth, "signer session token resolves");
+
+  const orch = await buildOrchestratorInfoBase64({
+    pricePerUnit: PRICE_PER_UNIT,
+    pixelsPerUnit: PIXELS_PER_UNIT,
+  });
+  const mock = mockSignerFetch({ signerHost: "http://test-signer.invalid" });
+  t.after(mock.restore);
+
+  const requestId = `byoc-preload-${randomUUID()}`;
+  const manifestId = `job-${randomUUID()}`;
+  const result = await proxyGenerateLivePayment(
+    {
+      type: "byoc",
+      RequestID: requestId,
+      manifestID: manifestId,
+      preloadSeconds: 3,
+      Orchestrator: orch,
+    },
+    auth!,
+  );
+  assert.equal(
+    result.status,
+    200,
+    `proxyGenerateLivePayment expected 200, got ${result.status}: ${JSON.stringify(result.body)}`,
+  );
+
+  const usageRows = await db
+    .select()
+    .from(usageRecords)
+    .where(and(eq(usageRecords.clientId, app.clientId), eq(usageRecords.requestId, requestId)));
+  assert.equal(usageRows.length, 1);
+  assert.equal(usageRows[0]!.userId, "byoc-preload-user");
+  assert.equal(usageRows[0]!.units, "3");
+  assert.equal(usageRows[0]!.fee, (3n * BigInt(PRICE_PER_UNIT)).toString());
+
+  const sessionRows = await db
+    .select()
+    .from(streamSessions)
+    .where(eq(streamSessions.manifestId, manifestId));
+  assert.equal(sessionRows.length, 1);
+  assert.equal(sessionRows[0]!.signerPaymentCount, 1);
+});
+
+run("successful zero-fee signer payment still increments usage count", async (t) => {
+  const restoreSigner = await ensureRunningSigner();
+  t.after(restoreSigner);
+
+  const app = await seedDeveloperAppWithClient({ status: "approved" });
+  t.after(() => cleanupTestApp(app));
+
+  const token = await createJobTokenForApp({
+    userId: app.userId,
+    clientId: app.clientId,
+    scopes: "sign:job",
+  });
+  const auth = await validateBearerToken(token);
+  assert.ok(auth, "signer token resolves");
+
+  const mock = mockSignerFetch({ signerHost: "http://test-signer.invalid" });
+  t.after(mock.restore);
+
+  const requestId = `zero-fee-${randomUUID()}`;
+  const result = await proxyGenerateLivePayment(
+    {
+      type: "byoc",
+      RequestID: requestId,
+      manifestID: `job-${randomUUID()}`,
+      preloadSeconds: 3,
+    },
+    auth!,
+  );
+  assert.equal(
+    result.status,
+    200,
+    `proxyGenerateLivePayment expected 200, got ${result.status}: ${JSON.stringify(result.body)}`,
+  );
+
+  const usageRows = await db
+    .select()
+    .from(usageRecords)
+    .where(and(eq(usageRecords.clientId, app.clientId), eq(usageRecords.requestId, requestId)));
+  assert.equal(usageRows.length, 1);
+  assert.equal(usageRows[0]!.units, "3");
+  assert.equal(usageRows[0]!.fee, "0");
 });
 
 run("plan capability upcharge is persisted and exposed through Usage API events", async (t) => {
@@ -352,14 +435,10 @@ run("plan capability upcharge is persisted and exposed through Usage API events"
     pixelsPerUnit: PIXELS_PER_UNIT,
   });
 
-  invalidateNaapCaches();
-  t.after(invalidateNaapCaches);
   const mock = mockSignerFetch({
     signerHost: "http://test-signer.invalid",
-    dashboardPricingResponse: PRICING_ROWS,
   });
   t.after(mock.restore);
-  await refreshDashboardPricing();
 
   const gatewayRequestId = `plan-upcharge-${randomUUID()}`;
   const result = await proxyGenerateLivePayment(
@@ -422,7 +501,7 @@ run("plan capability upcharge is persisted and exposed through Usage API events"
   assert.equal(body.totals.endUserBillableUsdMicros, expectedBillableUsdMicros.toString());
 });
 
-run("generate-live-payment forwards when NaaP pricing cache is empty", async (t) => {
+run("generate-live-payment writes usage_billing_events from negotiated ticket without NaaP pricing", async (t) => {
   const restoreSigner = await ensureRunningSigner();
   t.after(restoreSigner);
 
@@ -442,19 +521,15 @@ run("generate-live-payment forwards when NaaP pricing cache is empty", async (t)
     pixelsPerUnit: PIXELS_PER_UNIT,
   });
 
-  invalidateNaapCaches();
-  t.after(invalidateNaapCaches);
   const mock = mockSignerFetch({
     signerHost: "http://test-signer.invalid",
-    dashboardPricingResponse: PRICING_ROWS,
   });
   t.after(mock.restore);
-  // Do not call refreshDashboardPricing — signer path must not require a primed cache.
 
-  const gatewayRequestId = `pricing-cache-miss-${randomUUID()}`;
+  const gatewayRequestId = `negotiated-ticket-${randomUUID()}`;
   const result = await proxyGenerateLivePayment(
     {
-      ManifestID: "cache-miss-manifest",
+      ManifestID: "negotiated-manifest",
       RequestID: gatewayRequestId,
       InPixels: PER_REQUEST_PIXELS,
       Orchestrator: orch,
@@ -479,20 +554,20 @@ run("generate-live-payment forwards when NaaP pricing cache is empty", async (t)
     .where(eq(transactions.gatewayRequestId, gatewayRequestId))
     .limit(1);
   assert.ok(txnRows[0], "usage transaction recorded");
-  assert.equal(txnRows[0].priceValidationStatus, "pricing_unavailable");
+  assert.equal(txnRows[0].priceValidationStatus, "matched");
 
   const billingRows = await db
     .select()
     .from(usageBillingEvents)
     .where(eq(usageBillingEvents.gatewayRequestId, gatewayRequestId));
-  assert.equal(
-    billingRows.length,
-    0,
-    "usageBillingEvents requires validated cached pricing",
-  );
+  assert.equal(billingRows.length, 1, "usage_billing_events from negotiated ticket");
+  assert.equal(billingRows[0]!.pipeline, PIPELINE);
+  assert.equal(billingRows[0]!.modelId, MODEL_ID);
+  assert.equal(billingRows[0]!.advertisedPriceWeiPerUnit, PRICE_PER_UNIT.toString());
+  assert.equal(billingRows[0]!.signedPriceWeiPerUnit, PRICE_PER_UNIT.toString());
 });
 
-run("generate-live-payment forwards when cached pricing does not match the ticket", async (t) => {
+run("generate-live-payment records missing_constraint when pipeline/model absent", async (t) => {
   const restoreSigner = await ensureRunningSigner();
   t.after(restoreSigner);
 
@@ -512,24 +587,18 @@ run("generate-live-payment forwards when cached pricing does not match the ticke
     pixelsPerUnit: PIXELS_PER_UNIT,
   });
 
-  invalidateNaapCaches();
-  t.after(invalidateNaapCaches);
   const mock = mockSignerFetch({
     signerHost: "http://test-signer.invalid",
-    dashboardPricingResponse: PRICING_MISMATCH,
   });
   t.after(mock.restore);
-  await refreshDashboardPricing();
 
-  const gatewayRequestId = `pricing-mismatch-${randomUUID()}`;
+  const gatewayRequestId = `missing-constraint-${randomUUID()}`;
   const result = await proxyGenerateLivePayment(
     {
-      ManifestID: "mismatch-manifest",
+      ManifestID: "no-pipeline-manifest",
       RequestID: gatewayRequestId,
       InPixels: PER_REQUEST_PIXELS,
       Orchestrator: orch,
-      pipeline: PIPELINE,
-      modelId: MODEL_ID,
       attributionSource: "pymthouse_gateway",
       gatewayRequestId,
       paymentMetadataVersion: PAYMENT_METADATA_VERSION,
@@ -544,7 +613,7 @@ run("generate-live-payment forwards when cached pricing does not match the ticke
     .where(eq(transactions.gatewayRequestId, gatewayRequestId))
     .limit(1);
   assert.ok(txnRows[0]);
-  assert.equal(txnRows[0].priceValidationStatus, "price_mismatch");
+  assert.equal(txnRows[0].priceValidationStatus, "missing_constraint");
 
   const billingRows = await db
     .select()

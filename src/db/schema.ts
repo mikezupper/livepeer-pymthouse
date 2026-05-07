@@ -146,13 +146,13 @@ export const transactions = pgTable(
     paymentMetadataVersion: text("payment_metadata_version"),
     /** SHA-256 of { pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }. */
     pipelineModelConstraintHash: text("pipeline_model_constraint_hash"),
-    /** Advertised NaaP price for the validated constraint. */
+    /** Negotiated (ticket) wei per unit for the constraint hash; same as signed when matched. */
     advertisedPriceWeiPerUnit: text("advertised_price_wei_per_unit"),
     advertisedPixelsPerUnit: text("advertised_pixels_per_unit"),
     /** Decoded from the ticket signing request. */
     signedPriceWeiPerUnit: text("signed_price_wei_per_unit"),
     signedPixelsPerUnit: text("signed_pixels_per_unit"),
-    /** matched | missing_constraint | pricing_unavailable | unknown_pipeline_model | missing_advertised_price | price_mismatch */
+    /** matched (constraint present) | missing_constraint | legacy rows may have pricing_unavailable | unknown_pipeline_model | price_mismatch */
     priceValidationStatus: text("price_validation_status"),
     priceValidationReason: text("price_validation_reason"),
     // --- ETH/USD oracle snapshot at signing time ---
@@ -518,9 +518,9 @@ export const priceOracleSnapshots = pgTable(
 );
 
 /**
- * Retail billing events keyed to a validated signed ticket.
- * Only created when the signing request includes an explicit pipeline/model constraint
- * AND the signed ticket price matches the NaaP advertised price for that constraint.
+ * Retail billing events keyed to a signed ticket with pipeline/model constraint.
+ * Created when the signing request resolves to an explicit pipeline/model and
+ * price evidence is taken from the negotiated ticket (orchestrator info).
  */
 export const usageBillingEvents = pgTable(
   "usage_billing_events",
@@ -537,7 +537,7 @@ export const usageBillingEvents = pgTable(
     userId: text("user_id"),
     planId: text("plan_id"),
     subscriptionId: text("subscription_id"),
-    // --- Validated pipeline/model (never an unvalidated client-supplied label) ---
+    // --- Pipeline/model constraint from request (body or capabilities) ---
     pipeline: text("pipeline").notNull(),
     modelId: text("model_id").notNull(),
     /** pymthouse_gateway | python_gateway | direct_api */
@@ -547,7 +547,7 @@ export const usageBillingEvents = pgTable(
     /** SHA-256 of { pipeline, modelId, orchAddress, priceWeiPerUnit, pixelsPerUnit }. */
     pipelineModelConstraintHash: text("pipeline_model_constraint_hash").notNull(),
     orchAddress: text("orch_address"),
-    // --- Advertised vs signed price evidence ---
+    // --- Negotiated ticket price (same as signed when recorded from generate-live-payment) ---
     advertisedPriceWeiPerUnit: text("advertised_price_wei_per_unit").notNull(),
     advertisedPixelsPerUnit: text("advertised_pixels_per_unit").notNull(),
     signedPriceWeiPerUnit: text("signed_price_wei_per_unit").notNull(),

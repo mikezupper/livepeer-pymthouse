@@ -204,6 +204,85 @@ run("usage API aggregates seeded rows, filters by date and user, and validates i
   assert.equal(badEnd.status, 400);
 });
 
+run("usage API groupBy=user resolves externalUserId from end_users for signer-session attribution", async (t) => {
+  const { GET } = await import("./route");
+  const { db } = await import("@/db/index");
+  const { endUsers } = await import("@/db/schema");
+
+  const app = await seedDeveloperAppWithClient({ status: "approved" });
+  t.after(() => cleanupTestApp(app));
+
+  const endUserPk = randomUUID();
+  await db.insert(endUsers).values({
+    id: endUserPk,
+    appId: app.clientId,
+    externalUserId: "naap-user-42",
+    creditBalanceWei: "0",
+  });
+
+  await seedUsage({
+    clientId: app.clientId,
+    userId: endUserPk,
+    feeWei: 99n,
+    createdAt: "2026-06-10T00:00:00.000Z",
+  });
+
+  const res = await GET(
+    new Request(
+      `http://localhost/api/v1/apps/${app.clientId}/usage?groupBy=user&startDate=2026-06-01T00:00:00.000Z&endDate=2026-06-30T23:59:59.999Z`,
+      { headers: { Authorization: basicAuthHeader(app.clientId, app.clientSecret) } },
+    ) as never,
+    { params: Promise.resolve({ id: app.clientId }) },
+  );
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    byUser: { endUserId: string; externalUserId: string | null; requestCount: number }[];
+  };
+  const row = body.byUser?.find((b) => b.endUserId === endUserPk);
+  assert.ok(row, "expected one byUser bucket keyed by end_users.id");
+  assert.equal(row!.externalUserId, "naap-user-42");
+  assert.equal(row!.requestCount, 1);
+});
+
+run("usage API groupBy=user preserves provider external ids stored on usage rows", async (t) => {
+  const { GET } = await import("./route");
+  const { db } = await import("@/db/index");
+  const { endUsers } = await import("@/db/schema");
+
+  const app = await seedDeveloperAppWithClient({ status: "approved" });
+  t.after(() => cleanupTestApp(app));
+
+  await db.insert(endUsers).values({
+    id: randomUUID(),
+    appId: app.clientId,
+    externalUserId: "naap-user-direct",
+    creditBalanceWei: "0",
+  });
+
+  await seedUsage({
+    clientId: app.clientId,
+    userId: "naap-user-direct",
+    feeWei: 123n,
+    createdAt: "2026-06-10T00:00:00.000Z",
+  });
+
+  const res = await GET(
+    new Request(
+      `http://localhost/api/v1/apps/${app.clientId}/usage?groupBy=user&startDate=2026-06-01T00:00:00.000Z&endDate=2026-06-30T23:59:59.999Z`,
+      { headers: { Authorization: basicAuthHeader(app.clientId, app.clientSecret) } },
+    ) as never,
+    { params: Promise.resolve({ id: app.clientId }) },
+  );
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    byUser: { endUserId: string; externalUserId: string | null; requestCount: number }[];
+  };
+  const row = body.byUser?.find((b) => b.endUserId === "naap-user-direct");
+  assert.ok(row, "expected byUser bucket keyed by provider external id");
+  assert.equal(row!.externalUserId, "naap-user-direct");
+  assert.equal(row!.requestCount, 1);
+});
+
 run("usage API aggregates billing events by pipeline/model and exposes gateway request events", async (t) => {
   const { GET } = await import("./route");
 
