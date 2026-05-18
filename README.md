@@ -5,6 +5,66 @@ This guide starts the full local stack:
 - PostgreSQL database (set `DATABASE_URL`; Neon or local Postgres)
 - Full **signer-dmz** (Apache + JWT + go-livepeer) via `infra/dev/docker-compose.local.yml` for local clone-and-run development
 
+## Fresh Clone: Copy-Paste Setup
+
+For a fresh local setup from a new clone, use this exact sequence:
+
+```bash
+fnm use
+npm install
+cp .env.example .env.local
+```
+
+Set at least these values in `.env.local`:
+
+```env
+NEXTAUTH_URL=http://localhost:3001
+NEXTAUTH_SECRET=change-me
+AUTH_TOKEN_PEPPER=change-me
+
+DATABASE_URL=postgresql://pymthouse:pymthouse@127.0.0.1:5432/pymthouse?sslmode=disable
+
+SIGNER_INTERNAL_URL=http://127.0.0.1:8080
+SIGNER_CLI_URL=http://127.0.0.1:8080/__signer_cli
+OIDC_ISSUER=http://localhost:3001/api/v1/oidc
+SIGNER_DMZ_JWKS_URL=http://host.docker.internal:3001/api/v1/oidc/jwks
+JWKS_URI=http://host.docker.internal:3001/api/v1/oidc/jwks
+
+SIGNER_NETWORK=arbitrum-one-mainnet
+ETH_RPC_URL=http://nyc-router.eliteencoder.net:3517
+HOST_DOCKER_INTERNAL_IP=<your host LAN IP if needed>
+```
+
+Then bring up the full stack:
+
+```bash
+bash ./infra/scripts/run-full-local-dev.sh
+```
+
+Verify it is up:
+
+```bash
+docker compose --env-file .env.local -f infra/dev/docker-compose.full.local.yml ps
+curl http://localhost:3001/api/v1/health
+curl http://127.0.0.1:8080/healthz
+```
+
+Open:
+- App: `http://localhost:3001`
+- Health: `http://localhost:3001/api/v1/health`
+
+If you need an admin login token:
+
+```bash
+npm run bootstrap
+```
+
+To stop the full stack:
+
+```bash
+docker compose --env-file .env.local -f infra/dev/docker-compose.full.local.yml down
+```
+
 ## Prerequisites
 
 - Node.js + npm
