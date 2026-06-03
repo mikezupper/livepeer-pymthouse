@@ -15,7 +15,6 @@ import {
   ensureM2mBackendClient,
   loadM2mOidcClientSummary,
   removeM2mBackendClient,
-  normalizePublicAllowedScopes,
   syncBackendM2mAllowedScopesFromPublicApp,
   updateClientConfig,
 } from "@/lib/oidc/clients";
@@ -94,10 +93,7 @@ export async function GET(
       clientInfo = {
         clientId: client.clientId,
         redirectUris: JSON.parse(client.redirectUris) as string[],
-        allowedScopes: normalizePublicAllowedScopes(
-          client.allowedScopes,
-          client.clientId,
-        ),
+        allowedScopes: client.allowedScopes,
         grantTypes: client.grantTypes,
         tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
         // Public app_ row must never report a secret when a confidential m2m_ sibling exists.
@@ -285,17 +281,12 @@ export async function PUT(
       if (body.tokenEndpointAuthMethod)
         clientUpdates.tokenEndpointAuthMethod = body.tokenEndpointAuthMethod;
       if (body.allowedScopes) {
-        const validScopeValues = new Set(
-          OIDC_SCOPES.filter((s) => !s.hiddenInAppConfig).map((s) => s.value),
-        );
+        const validScopeValues = new Set(OIDC_SCOPES.map((s) => s.value));
         const filtered = String(body.allowedScopes)
           .split(/[,\s]+/)
           .filter((s) => s && validScopeValues.has(s))
           .join(" ");
-        clientUpdates.allowedScopes = normalizePublicAllowedScopes(
-          filtered || DEFAULT_OIDC_SCOPES,
-          client.clientId,
-        );
+        clientUpdates.allowedScopes = filtered || DEFAULT_OIDC_SCOPES;
       }
       if (body.grantTypes) clientUpdates.grantTypes = body.grantTypes;
 
