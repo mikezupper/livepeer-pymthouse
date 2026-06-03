@@ -9,7 +9,11 @@ import type { Configuration, ClientMetadata, KoaContextWithOIDC } from "oidc-pro
 import { PostgresOidcAdapter } from "./adapter";
 import { findAccount } from "./account";
 import { getIssuer } from "./issuer-urls";
-import { hashClientSecret, normalizePublicAllowedScopes } from "./clients";
+import {
+  hashClientSecret,
+  normalizePublicAllowedScopes,
+  repairPublicOidcClientScopesInDatabase,
+} from "./clients";
 import { normalizePublicGrantTypes, parseGrantTypes } from "./grants";
 import { getTrustedLoginHosts, normalizeDomain } from "./custom-domains";
 import { ensureSigningKey } from "./jwks";
@@ -277,6 +281,12 @@ export async function getProvider(): Promise<Provider> {
 
   const issuer = getIssuer();
   const jwks = await loadJWKS();
+  const repaired = await repairPublicOidcClientScopesInDatabase();
+  if (repaired > 0) {
+    console.info(
+      `[OIDC] Repaired allowed_scopes (added openid) on ${repaired} public client(s)`,
+    );
+  }
   const clients = await loadClients();
 
   const configuration: Configuration = {
