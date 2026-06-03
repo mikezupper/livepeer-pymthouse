@@ -48,30 +48,6 @@ export function normalizePublicAllowedScopes(
   return ensureOpenIdScope(allowedScopes);
 }
 
-/**
- * Persist `openid` on every public OIDC client row (legacy apps saved before #112).
- * Returns how many rows were updated.
- */
-export async function repairPublicOidcClientScopesInDatabase(): Promise<number> {
-  const rows = await db.select().from(oidcClients);
-  let fixed = 0;
-  for (const row of rows) {
-    if (isM2mClientId(row.clientId)) {
-      continue;
-    }
-    const normalized = normalizePublicAllowedScopes(row.allowedScopes, row.clientId);
-    if (normalized === row.allowedScopes) {
-      continue;
-    }
-    await db
-      .update(oidcClients)
-      .set({ allowedScopes: normalized })
-      .where(eq(oidcClients.clientId, row.clientId));
-    fixed += 1;
-  }
-  return fixed;
-}
-
 export async function registerClient(config: OidcClientConfig): Promise<void> {
   const existingRows = await db
     .select()

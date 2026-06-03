@@ -7,7 +7,6 @@ import { eq, inArray } from "drizzle-orm";
 import {
   createAppClient,
   ensureM2mBackendClient,
-  normalizePublicAllowedScopes,
   updateClientConfig,
 } from "@/lib/oidc/clients";
 import { resetProvider } from "@/lib/oidc/provider";
@@ -125,17 +124,12 @@ export async function POST(request: NextRequest) {
     clientUpdates.tokenEndpointAuthMethod = body.tokenEndpointAuthMethod;
   }
   if (typeof body.allowedScopes === "string" && body.allowedScopes.trim()) {
-    const validScopeValues = new Set(
-      OIDC_SCOPES.filter((s) => !s.hiddenInAppConfig).map((s) => s.value),
-    );
+    const validScopeValues = new Set(OIDC_SCOPES.map((s) => s.value));
     const filtered = body.allowedScopes
       .split(/[,\s]+/)
       .filter((s: string) => s && validScopeValues.has(s))
       .join(" ");
-    clientUpdates.allowedScopes = normalizePublicAllowedScopes(
-      filtered || DEFAULT_OIDC_SCOPES,
-      clientId,
-    );
+    clientUpdates.allowedScopes = filtered || DEFAULT_OIDC_SCOPES;
   }
   if (Array.isArray(body.grantTypes) && body.grantTypes.length > 0) {
     const grantTypes = body.grantTypes.filter(
