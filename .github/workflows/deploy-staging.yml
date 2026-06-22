@@ -1,21 +1,27 @@
 name: Deploy staging
 
-# Manually deploys a chosen branch to the staging region. Staging is a paired unit:
+# Auto-deploys on push to the `staging` branch, or manually deploys a chosen branch.
+# Staging is a paired unit:
 # the Railway preview clearinghouse stack (kafka + OpenMeter collector + signer DMZ)
 # and the Vercel staging app (staging.pymthouse.com) are dependent services deployed
 # together from the same branch. Railway goes first, then Vercel (the frontend
 # depends on the backend services being up).
 #
 # Vercel: an ordinary Preview deployment is created and staging.pymthouse.com is
-# re-aliased onto it. This requires staging.pymthouse.com to be aliasable, i.e.
+# re-aliased onto it (`vercel alias set`). Git-triggered preview builds also pick
+# up the domain when staging.pymthouse.com is assigned to the staging Git branch
+# (run scripts/assign-staging-domain-branch.sh once, or use the Domains UI).
 # pymthouse.com must be a verified team domain under ecs-vercel (TXT verification,
-# no nameserver migration) — otherwise `vercel alias set` returns "no access".
+# no nameserver migration) — otherwise alias/branch assignment returns "no access".
 #
 # Enable with repository variables:
 #   RAILWAY_PREVIEW_AUTO_DEPLOY=true   (Railway half)
 #   VERCEL_PREVIEW_AUTO_DEPLOY=true    (Vercel half)
 
 on:
+  push:
+    branches:
+      - staging
   workflow_dispatch:
     inputs:
       branch:
@@ -37,7 +43,7 @@ jobs:
       deployments: write
     uses: ./.github/workflows/deploy-railway-preview.yml
     with:
-      ref: ${{ inputs.branch }}
+      ref: ${{ inputs.branch || github.ref_name }}
     secrets:
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       OPENMETER_URL: ${{ secrets.OPENMETER_URL }}
@@ -46,7 +52,10 @@ jobs:
 
   deploy-vercel:
     needs: deploy-railway
-    if: vars.VERCEL_PREVIEW_AUTO_DEPLOY == 'true'
+    if: >
+      always() &&
+      vars.VERCEL_PREVIEW_AUTO_DEPLOY == 'true' &&
+      (needs.deploy-railway.result == 'success' || needs.deploy-railway.result == 'skipped')
     permissions:
       contents: read
       deployments: write
@@ -69,7 +78,7 @@ jobs:
       - name: Checkout requested branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.branch || github.ref_name }}
           persist-credentials: false
 
       - name: Setup Node.js
