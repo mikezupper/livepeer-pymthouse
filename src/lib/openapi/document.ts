@@ -50,11 +50,6 @@ export function buildOpenApiDocument() {
       description:
         "Confidential M2M client (`m2m_…` + `pmth_cs_…` secret). RFC 6749 client authentication.",
     },
-    bearerApiKey: {
-      type: "http",
-      scheme: "bearer",
-      description: "Per-app-user API key (`pmth_<hex>`). Not an M2M client secret.",
-    },
     bearerUserJwt: {
       type: "http",
       scheme: "bearer",
@@ -69,7 +64,7 @@ export function buildOpenApiDocument() {
   };
 
   doc.externalDocs = {
-    description: "OIDC issuer discovery (device flow, RFC 8693 token endpoint)",
+    description: "OIDC issuer discovery (device flow, client_credentials)",
     url: `${oidcIssuer}/.well-known/openid-configuration`,
   };
 
