@@ -8,11 +8,20 @@ import {
   openMeterUsesLiveNetworkInTests,
   requireOpenMeterForUsageReads,
   SIGNED_TICKET_COUNT_METER,
+  usdNanosToMicros,
 } from "@/lib/openmeter/constants";
 import type { MeterQueryRow } from "@openmeter/sdk";
 
 function avoidOpenMeterNetworkInTests(): boolean {
   return process.env.NODE_ENV === "test" && !openMeterUsesLiveNetworkInTests();
+}
+
+/**
+ * OpenMeter `network_fee_usd_nanos` meter values → USD micros for ledger/UI.
+ * Display with `formatUsdMicros` from `@/lib/format-usd` (not formatUsdNanos).
+ */
+function feeMicrosFromMeterValue(value: unknown): bigint {
+  return usdNanosToMicros(BigInt(Math.floor(Number(value ?? 0))));
 }
 
 export type OpenMeterUsageRow = {
@@ -146,7 +155,7 @@ function aggregateUserRows(input: {
     if (clientIdFromGroup(group, input.clientId) !== input.clientId) continue;
     feeByUser.set(
       externalUserId,
-      (feeByUser.get(externalUserId) ?? 0n) + BigInt(Math.floor(Number(row.value ?? 0))),
+      (feeByUser.get(externalUserId) ?? 0n) + feeMicrosFromMeterValue(row.value),
     );
   }
 
@@ -199,7 +208,7 @@ export function aggregatePipelineModelRows(input: {
     metaByKey.set(key, { pipeline, modelId });
     feeByKey.set(
       key,
-      (feeByKey.get(key) ?? 0n) + BigInt(Math.floor(Number(row.value ?? 0))),
+      (feeByKey.get(key) ?? 0n) + feeMicrosFromMeterValue(row.value),
     );
   }
 
@@ -284,7 +293,7 @@ export function aggregateUserPipelineModelRows(input: {
     });
     feeByKey.set(
       meta.key,
-      (feeByKey.get(meta.key) ?? 0n) + BigInt(Math.floor(Number(row.value ?? 0))),
+      (feeByKey.get(meta.key) ?? 0n) + feeMicrosFromMeterValue(row.value),
     );
   }
 
@@ -356,7 +365,7 @@ export function aggregateDailyPipelineModelRows(input: {
       requestCount: 0,
       networkFeeUsdMicros: 0n,
     };
-    existing.networkFeeUsdMicros += BigInt(Math.floor(Number(row.value ?? 0)));
+    existing.networkFeeUsdMicros += feeMicrosFromMeterValue(row.value);
     byKey.set(key, existing);
   }
 

@@ -7,7 +7,7 @@ import {
 } from "@/components/BillingUsageDashboard.helpers";
 import { formatBillingWei } from "@/lib/billing-format";
 import { getBillingUsageDashboardData } from "@/lib/billing-usage-dashboard-data";
-import { formatUsdMicrosString } from "@/lib/format-usd-micros";
+import { formatUsdMicros } from "@/lib/format-usd";
 
 export default async function BillingUsageDashboard({
   filterAppId,
@@ -48,7 +48,7 @@ export default async function BillingUsageDashboard({
 
   const isOpenMeter = usageSource === "openmeter";
   const totalFeesLabel = isOpenMeter
-    ? formatUsdMicrosString(totalNetworkFeeUsdMicros.toString(), 4) ?? "$0"
+    ? formatUsdMicros(totalNetworkFeeUsdMicros.toString(), 6) ?? "$0"
     : formatBillingWei(totalFeeWei.toString());
 
   const singleAppName = scope === "single" ? orderedApps[0]?.name : null;
@@ -94,7 +94,7 @@ export default async function BillingUsageDashboard({
             {totalFeesLabel}
           </p>
           <p className="text-xs text-zinc-600 mt-2">
-            {isOpenMeter ? "network fees (USD micros meter)" : "estimated usage fees"}
+            {isOpenMeter ? "network fees (OpenMeter)" : "estimated usage fees"}
           </p>
         </div>
         <div className="border border-zinc-800 rounded-xl p-4 sm:p-5 bg-zinc-900/30 min-w-0">
