@@ -13,8 +13,11 @@ import { getHostedOpenMeterClient } from "@/lib/openmeter/client";
 import {
   buildOpenMeterCustomerKey,
   buildOwnerCustomerKey,
+  buildOwnerMeterSubjects,
   isOwnerCustomerKey,
+  normalizePlatformUserId,
   parseOpenMeterCustomerKey,
+  parseOwnerCustomerKey,
 } from "@/lib/openmeter/customer-key";
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -176,18 +179,47 @@ export function eventUsageSubject(event: IngestedEventLike): string | null {
   if (fromData) {
     return fromData;
   }
-  const parsed = parseOpenMeterCustomerKey(event.event?.subject?.trim() || "");
+  const subject = event.event?.subject?.trim() || "";
+  if (isOwnerCustomerKey(subject)) {
+    return subject;
+  }
+  const parsed = parseOpenMeterCustomerKey(subject);
   return parsed?.externalUserId ?? null;
 }
 
 export function eventClientId(event: IngestedEventLike): string | null {
   const data = event.event?.data ?? {};
   const fromData = stringField(data, "client_id");
-  if (fromData) {
+  if (fromData && fromData !== "owner") {
     return fromData;
   }
-  const parsed = parseOpenMeterCustomerKey(event.event?.subject?.trim() || "");
-  return parsed?.clientId ?? null;
+  const subject = event.event?.subject?.trim() || "";
+  // Owner wallet events use CE subject owner:{id}; client lives in data only.
+  if (isOwnerCustomerKey(subject)) {
+    return null;
+  }
+  const parsed = parseOpenMeterCustomerKey(subject);
+  if (!parsed || parsed.clientId === "owner") {
+    return null;
+  }
+  return parsed.clientId;
+}
+
+/** Expand bare / owner: / user: forms so list filters match subscription meters. */
+export function expandViewerSubjectMatchKeys(
+  subjects: ReadonlySet<string>,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const raw of subjects) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    keys.add(trimmed);
+    const normalized = normalizePlatformUserId(trimmed);
+    keys.add(normalized);
+    keys.add(buildOwnerCustomerKey(normalized));
+    keys.add(`user:${normalized}`);
+  }
+  return keys;
 }
 
 export function eventMatchesViewerSubjects(
@@ -201,8 +233,17 @@ export function eventMatchesViewerSubjects(
   if (event.event.type && event.event.type !== CREATE_SIGNED_TICKET_EVENT_TYPE) {
     return false;
   }
+  const matchKeys = expandViewerSubjectMatchKeys(subjects);
   const usageSubject = eventUsageSubject(event);
-  if (!usageSubject || !subjects.has(usageSubject)) {
+  const ceSubject = event.event.subject?.trim() || "";
+  const candidates = [usageSubject, ceSubject].filter(
+    (value): value is string => Boolean(value),
+  );
+  const subjectMatched = candidates.some(
+    (value) =>
+      matchKeys.has(value) || matchKeys.has(normalizePlatformUserId(value)),
+  );
+  if (!subjectMatched) {
     return false;
   }
   if (clientIdOrIds == null) {
@@ -382,27 +423,75 @@ function normalizeClientIdFilter(
   return new Set(ids);
 }
 
+function compoundQueriesForSubject(
+  subject: string,
+  clientIds: ReadonlySet<string> | null,
+): string[] {
+  if (clientIds && clientIds.size > 0) {
+    return [...clientIds].map((clientId) =>
+      buildOpenMeterCustomerKey(clientId, subject),
+    );
+  }
+  // Partial subject match: compound auth_id ends with :external_user_id
+  return [subject];
+}
+
+function addQueries(target: Set<string>, keys: Iterable<string>): void {
+  for (const key of keys) {
+    target.add(key);
+  }
+}
+
+function addOwnerSubjectQueries(
+  queries: Set<string>,
+  ownerKey: string,
+  clientIds: ReadonlySet<string> | null,
+): void {
+  const ownerUserId = parseOwnerCustomerKey(ownerKey);
+  if (!ownerUserId) return;
+  queries.add(ownerKey);
+  queries.add(ownerUserId);
+  if (clientIds && clientIds.size > 0) {
+    addQueries(queries, buildOwnerMeterSubjects(ownerUserId, [...clientIds]));
+    return;
+  }
+  addQueries(queries, compoundQueriesForSubject(ownerUserId, null));
+}
+
+function addPlatformSubjectQueries(
+  queries: Set<string>,
+  subject: string,
+  clientIds: ReadonlySet<string> | null,
+): void {
+  const normalized = normalizePlatformUserId(subject);
+  queries.add(subject);
+  queries.add(normalized);
+  queries.add(buildOwnerCustomerKey(normalized));
+  if (clientIds && clientIds.size > 0) {
+    addQueries(queries, buildOwnerMeterSubjects(normalized, [...clientIds]));
+    for (const clientId of clientIds) {
+      queries.add(buildOpenMeterCustomerKey(clientId, subject));
+    }
+    return;
+  }
+  addQueries(queries, compoundQueriesForSubject(subject, null));
+}
+
 function buildSubjectQueries(
   subjects: ReadonlySet<string>,
   clientIds: ReadonlySet<string> | null,
 ): string[] {
-  const queries: string[] = [];
+  const queries = new Set<string>();
   for (const subject of subjects) {
-    if (isOwnerCustomerKey(subject)) {
-      // Owner wallet events use subject = owner:{users.id} (not compound).
-      queries.push(subject);
+    const trimmed = subject.trim();
+    if (!trimmed) continue;
+    if (isOwnerCustomerKey(trimmed)) {
+      addOwnerSubjectQueries(queries, trimmed, clientIds);
       continue;
     }
-    if (clientIds && clientIds.size > 0) {
-      for (const clientId of clientIds) {
-        queries.push(buildOpenMeterCustomerKey(clientId, subject));
-      }
-    } else {
-      // Partial subject match: compound auth_id ends with :external_user_id
-      queries.push(subject);
-    }
+    addPlatformSubjectQueries(queries, trimmed, clientIds);
   }
-  return queries;
+  return [...queries];
 }
 
 async function loadAppNames(clientIds: string[]): Promise<Map<string, string>> {
