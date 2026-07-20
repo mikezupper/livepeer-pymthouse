@@ -101,6 +101,7 @@ function UsageLoadingShell({
 function deriveFilteredView(
   data: BillingUsageDashboardClientPayload,
   selectedPublicClientIds: string[],
+  historyScope: "own" | "all",
 ) {
   const allIds = data.orderedApps.map((a) => a.publicClientId);
   const allSelected =
@@ -123,12 +124,22 @@ function deriveFilteredView(
   }
   filteredAppUsage = filteredAppUsage.filter((e) => e.requestCount > 0);
 
+  // Admin All Usage + all apps selected: omit clientId filter so the platform
+  // list is truly unrestricted (and avoids a huge id-set post-filter).
+  // Subset selection still passes the dropdown ids. Own scope unchanged.
+  let historyClientIds: string[];
+  if (allSelected && historyScope === "all") {
+    historyClientIds = [];
+  } else if (allSelected) {
+    historyClientIds = data.orderedApps.map((a) => a.publicClientId);
+  } else {
+    historyClientIds = selectedPublicClientIds;
+  }
+
   return {
     filteredSeries,
     filteredAppUsage,
-    historyClientIds: allSelected
-      ? data.orderedApps.map((a) => a.publicClientId)
-      : selectedPublicClientIds,
+    historyClientIds,
   };
 }
 
@@ -223,23 +234,27 @@ function chartEmptyMessage(selectedCount: number): string {
 }
 
 function SignedTicketsBlock({
-  show,
   needsSelection,
   scope,
+  historyScope,
   orderedApps,
   historyClientIds,
 }: Readonly<{
-  show: boolean;
   needsSelection: boolean;
   scope: "all" | "single";
+  /** Viewer-own vs platform-wide admin history. */
+  historyScope: "own" | "all";
   orderedApps: BillingAppRow[];
   historyClientIds: string[];
 }>) {
-  if (!show) return null;
+  const isPlatform = historyScope === "all";
+  const title = isPlatform
+    ? "Signed ticket requests"
+    : "Your signed ticket requests";
   if (needsSelection) {
     return (
       <section className="mb-6 sm:mb-8 rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 sm:p-5">
-        <h2 className="text-sm font-semibold text-zinc-200">Your signed ticket requests</h2>
+        <h2 className="text-sm font-semibold text-zinc-200">{title}</h2>
         <p className="text-sm text-zinc-500 py-6 text-center">
           Select at least one application to view request history.
         </p>
@@ -251,6 +266,7 @@ function SignedTicketsBlock({
       <SignedTicketRequestHistory
         clientId={scope === "single" ? orderedApps[0]?.publicClientId : null}
         clientIds={scope === "single" ? null : historyClientIds}
+        historyScope={historyScope}
       />
     </div>
   );
@@ -356,8 +372,9 @@ function BillingUsageBody({
     setSelectedAppIds(allIdsKey.length > 0 ? allIdsKey.split("\0") : []);
   }
 
-  const derived = deriveFilteredView(data, selectedAppIds);
-  const showSignedTickets = !showTabs || activeTab === "mine";
+  const historyScope: "own" | "all" =
+    showTabs && activeTab === "all" ? "all" : "own";
+  const derived = deriveFilteredView(data, selectedAppIds, historyScope);
   const periodCopy =
     activeTab === "all" && showTabs
       ? "Platform-wide usage for the current cycle."
@@ -430,9 +447,9 @@ function BillingUsageBody({
       </div>
 
       <SignedTicketsBlock
-        show={showSignedTickets}
         needsSelection={selectedAppIds.length === 0 && isMultiApp}
         scope={scope}
+        historyScope={historyScope}
         orderedApps={orderedApps}
         historyClientIds={derived.historyClientIds}
       />
